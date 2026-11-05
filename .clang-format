@@ -1,0 +1,12 @@
+BasedOnStyle: LLVM
+Standard: c++20
+IndentWidth: 2
+ColumnLimit: 80
+BreakStringLiterals: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+SeparateDefinitionBlocks: Always
+SortIncludes: Never
+SortUsingDeclarations: Never

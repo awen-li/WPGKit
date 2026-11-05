@@ -1,0 +1,8 @@
+@PACKAGE_INIT@
+include("${CMAKE_CURRENT_LIST_DIR}/WPGKitDependencies.cmake")
+if(NOT TARGET WPGKit::Dependencies)
+  set(WPGKit_FOUND FALSE)
+  return()
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/WPGKitTargets.cmake")
+check_required_components(WPGKit)

@@ -1,0 +1,6 @@
+WPGKit
+
+The profiling source is adapted from the Apache-2.0-licensed ConcurDep
+implementation, revision 32c4ff0bc513d964cf153f6a604403fe79861a74.
+Adaptations add session ownership, scoped measurements, and explicit RSS
+availability. See the notices in Profiling.h and Profiling.cpp.

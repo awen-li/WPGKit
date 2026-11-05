@@ -1,0 +1,14 @@
+include(CMakeFindDependencyMacro)
+find_dependency(LLVM 18.1.3 EXACT CONFIG)
+find_dependency(Threads)
+find_path(WPGKIT_CLANG_INCLUDE_DIR clang/Analysis/CFG.h
+  HINTS ${LLVM_INCLUDE_DIRS} REQUIRED)
+find_library(WPGKIT_CLANG_CPP_LIBRARY NAMES clang-cpp libclang-cpp.so.18.1
+  HINTS ${LLVM_LIBRARY_DIRS} REQUIRED)
+if(NOT TARGET WPGKit::Dependencies)
+  add_library(WPGKit::Dependencies INTERFACE IMPORTED)
+  set_target_properties(WPGKit::Dependencies PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${WPGKIT_CLANG_INCLUDE_DIR};${LLVM_INCLUDE_DIRS}"
+    INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${WPGKIT_CLANG_INCLUDE_DIR};${LLVM_INCLUDE_DIRS}"
+    INTERFACE_LINK_LIBRARIES "${WPGKIT_CLANG_CPP_LIBRARY};LLVM;Threads::Threads")
+endif()

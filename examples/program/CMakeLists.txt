@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.24)
+project(WPGKitExample LANGUAGES CXX)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+add_executable(example main.cpp)
+target_compile_features(example PRIVATE cxx_std_20)
