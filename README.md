@@ -146,9 +146,10 @@ Compilation commands and linker maps selected inputs for `iree-flatcc-cli`,
 | Measurement | FlatCC | MLIR TableGen | IREE |
 |---|---:|---:|---:|
 | Translation units | 26 | 109 | 1,620 |
-| Source size (SLOC, selected source files) | 13,651 | 49,357 | 577,393 |
-| Retained function CFGs | 7,939 | 55,436 | 1,853,933 |
-| Function bodies in the inter-CFG | 646 | 9,155 | 772,039 |
+| Unique input files (sources + included files) | 199 | 774 | 4,400 |
+| Input SLOC (sources + included files) | 34,678 | 215,520 | 2,101,112 |
+| Captured function CFGs, including unreached bodies | 7,939 | 55,436 | 1,853,933 |
+| Reached function bodies in the inter-CFG | 646 | 9,155 | 772,039 |
 | **Total wall time** | **0.709 s** | **47.25 s** | **88.01 min** |
 | **Peak process RSS** | **122.65 MiB** | **528.39 MiB** | **19.70 GiB** |
 | AST loading | 0.328 s | 37.57 s | 50.66 min |
@@ -158,11 +159,27 @@ Compilation commands and linker maps selected inputs for `iree-flatcc-cli`,
 | AST release | 0.009 s | 0.724 s | 70.30 s |
 | Unresolved call sites | 110 | 707 | 31,386 |
 
-Source size counts nonblank, noncomment lines with `cloc` 1.98 in the selected
-translation-unit source files, counting each distinct file path once. It
-includes generated source files and excludes included headers. Retained CFGs
-also cover functions extracted from headers and template instantiations;
-only reached function bodies enter the inter-CFG.
+Input SLOC counts nonblank, noncomment lines in the union of files from Ninja
+dependency records for the exact selected compilation outputs. All selected
+outputs have dependency records. Each canonical file path is counted once with
+`cloc` 1.98's C++ filter, including headers, generated files, and system headers.
+This measures whole-file source before preprocessing; it includes inactive
+conditional branches and does not multiply lines for template instantiations.
+
+| Input SLOC breakdown | FlatCC | MLIR TableGen | IREE |
+|---|---:|---:|---:|
+| Selected translation-unit source files | 13,651 | 49,357 | 577,393 |
+| Repository headers and other included files | 11,270 | 41,471 | 199,925 |
+| Generated included files | 0 | 750 | 1,194,143 |
+| System headers and included files | 9,757 | 123,942 | 129,651 |
+| **Total** | **34,678** | **215,520** | **2,101,112** |
+
+These categories are disjoint; generated translation-unit sources belong to
+the first row. CFGs count distinct function identities, including header
+functions and instantiated specializations. Captured CFGs also include bodies
+not reached from the selected roots; only reached bodies enter the inter-CFG.
+The saved reports do not provide CFG counts by definition file or template
+kind, so they cannot quantify each category's contribution to the CFG total.
 
 Total time also includes input discovery and reporting; it excludes building
 the benchmark programs. Peak RSS covers the entire analyzer process. All
