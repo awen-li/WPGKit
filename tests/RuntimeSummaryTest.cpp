@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 
 using namespace wpgkit;
 
@@ -282,6 +283,100 @@ void allocationResult() {
           result.calls.front().externalEffects.has(CallEffect::Allocate) &&
           !result.hasLimitation("store through unknown address"),
       "open failure-handler effects do not erase the allocator's known result address");
+}
+
+void newExpressionStorage() {
+  for (const auto *expression : {"new int", "new int[4]"}) {
+    CallGraphSession session;
+    const auto code = std::string{"#include <new>\nvoid entry() { auto p = "} +
+                      expression + "; *p = 1; }";
+    add(session, code.c_str());
+    const auto result = solve(session);
+    check(result.pointerStorage.objects == 1,
+          "a new expression and its allocator share one allocation object");
+    check(!result.hasLimitation("store through unknown address"),
+          "default new retains its fresh result despite open handler effects");
+  }
+}
+
+void placementResult() {
+  CallGraphSession session;
+  add(session, R"cpp(
+    using Fn = void (*)();
+    void kept() {} void unrelated() {}
+    void *operator new(__SIZE_TYPE__, void *storage, void *) { return storage; }
+    void entry() {
+      Fn selected = nullptr, untouched = &kept;
+      auto *p = new (&selected, &untouched) Fn;
+      *p = &unrelated;
+      untouched();
+    }
+  )cpp");
+  const auto result = solve(session);
+  check(
+      reached(result, "kept") && !reached(result, "unrelated"),
+      "placement allocation returns its body's storage, not every pointer argument");
+}
+
+void suppliedNewExpression() {
+  for (const bool modeled : {false, true}) {
+    CallGraphSession session(
+        nullptr, {}, modeled ? ExternalModules{} : ExternalModules::empty());
+    add(session, R"cpp(
+      using Fn = void (*)();
+      Fn storage;
+      void target() {}
+      void *operator new(__SIZE_TYPE__) { return &storage; }
+      void entry() { auto *p = new Fn; *p = &target; storage(); }
+    )cpp");
+    const auto result = solve(session);
+    check(reached(result, "target") && result.statistics.modeledCalls == 0 &&
+              result.pointerStorage.objects == 2,
+          "a supplied allocator determines new storage with or without models");
+  }
+}
+
+void unmodeledNewExpression() {
+  CallGraphSession session(nullptr, {}, ExternalModules::empty());
+  add(session, R"cpp(
+    #include <new>
+    void entry() { auto p = new int *; *p = nullptr; }
+  )cpp");
+  const auto result = solve(session);
+  check(result.statistics.modeledCalls == 0 &&
+            result.statistics.unknownCalls == 1 &&
+            !result.closedWithinInputs() &&
+            result.hasLimitation("store through unknown address"),
+        "new without an allocator body or model retains an unknown result");
+}
+
+void alignedPlacementArguments() {
+  for (const bool consumed : {false, true}) {
+    CallGraphSession session;
+    const auto code = std::string{R"cpp(
+    #include <new>
+    using Fn = void (*)();
+    struct alignas(64) Value { int n; };
+    void hook() {}
+    void *operator new(__SIZE_TYPE__, std::align_val_t,
+                       void *storage, Fn *callback) {
+      *callback = &hook;
+      return storage;
+    }
+    void entry() {
+      alignas(Value) char storage[sizeof(Value)];
+      Fn callback = nullptr;
+  )cpp"} + (consumed ? "auto *p = " : "") +
+                      R"cpp(
+      new (storage, &callback) Value;
+      callback();
+    }
+  )cpp";
+    add(session, code.c_str());
+    const auto result = solve(session);
+    check(reached(result, "hook"),
+          "implicit alignment preserves the positions of placement arguments");
+  }
 }
 
 bool unknownAddress(const CallGraphResult &result) {
@@ -811,6 +906,11 @@ int main() {
   callbackTemporaries();
   arrayDeletion();
   lateCallbackUncertainty();
+  placementResult();
+  suppliedNewExpression();
+  newExpressionStorage();
+  unmodeledNewExpression();
+  alignedPlacementArguments();
   allocationResult();
   allocationWrappers();
   deletionWrappers();

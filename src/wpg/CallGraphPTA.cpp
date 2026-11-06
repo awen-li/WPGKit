@@ -538,6 +538,7 @@ private:
   CallGraphResult snapshot(bool consume);
   void buildDataFlow(CallGraphResult &result, bool consume);
   std::size_t site(const clang::CallExpr *expr, FunctionId caller);
+  std::size_t site(const clang::CXXNewExpr *expr, FunctionId caller);
   std::size_t site(const clang::Expr *expr, const clang::FunctionDecl *callee,
                    std::vector<const clang::Expr *> args, FunctionId caller);
   std::size_t site(const clang::VarDecl *decl,
@@ -1007,19 +1008,9 @@ Andersen::Node Engine::expressionValue(const clang::Expr *expr,
     return result;
   }
   if (const auto *allocation = llvm::dyn_cast<clang::CXXNewExpr>(expr)) {
-    const auto object = pta_.addNode();
-    const auto result = pta_.addNode();
-    pta_.address(result, object);
-    std::vector<const clang::Expr *> args{nullptr}; // implicit size_t argument
-    for (const auto *arg : allocation->placement_arguments()) {
-      args.push_back(arg);
-      if (arg->getType()->isPointerType())
-        pta_.copy(result, value(arg, caller));
-    }
-    const auto index =
-        site(allocation, allocation->getOperatorNew(), std::move(args), caller);
-    pta_.copy(result, sites_.at(index).result);
-    return result;
+    // The selected allocator's body, model or conservative fallback supplies
+    // the storage. Placement arguments need not be aliases of its result.
+    return sites_.at(site(allocation, caller)).result;
   }
   return unknownValue("unsupported pointer expression");
 }
@@ -1120,6 +1111,15 @@ std::size_t Engine::site(const clang::CallExpr *expr, FunctionId caller) {
     args.push_back(expr->getArg(i));
   return site(expr, ExternalModules::resolveCallee(*expr), std::move(args),
               caller);
+}
+
+std::size_t Engine::site(const clang::CXXNewExpr *expr, FunctionId caller) {
+  // Size and optional alignment are implicit scalar arguments. Keep their
+  // positions so explicit placement pointers bind to the selected formals.
+  std::vector<const clang::Expr *> args(1 + expr->passAlignment(), nullptr);
+  for (const auto *arg : expr->placement_arguments())
+    args.push_back(arg);
+  return site(expr, expr->getOperatorNew(), std::move(args), caller);
 }
 
 void Engine::captureArguments(std::size_t index, const clang::Expr *expr,
@@ -1817,10 +1817,7 @@ bool Engine::Body::VisitMaterializeTemporaryExpr(
 }
 
 bool Engine::Body::VisitCXXNewExpr(clang::CXXNewExpr *expr) {
-  std::vector<const clang::Expr *> args{nullptr}; // implicit size_t argument
-  for (const auto *arg : expr->placement_arguments())
-    args.push_back(arg);
-  engine_.site(expr, expr->getOperatorNew(), std::move(args), function_);
+  engine_.site(expr, function_);
   return true;
 }
 

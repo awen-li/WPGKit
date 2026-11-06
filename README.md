@@ -131,6 +131,37 @@ AST-release time separately, with process RSS measurements. Parent scopes
 include their children; do not sum the parent and child times. RSS is
 process-wide and sampling can miss brief peaks. No analyzer memory cap is imposed.
 
+## Benchmark results
+
+The following measurements were recorded on 5 November 2026 using a Release
+build of the CLI and shared library, LLVM/Clang 18.1.3, and `--profile`. Each
+benchmark ran once on Linux, pinned to one CPU core of an Intel Core Ultra 7
+265K. No memory or time cap was imposed, and no process swap was observed.
+
+Inputs came from IREE revision `1b60b62ed4b3f2a3c95f42b397889444c7df318c`
+and its bundled LLVM revision `c6ff6d78618a5709d518d5f7f2a59ec62273fd10`.
+Compilation commands and linker maps selected inputs for `iree-flatcc-cli`,
+`mlir-tblgen`, and `iree-compile` with `libIREECompiler`, respectively.
+
+| Measurement | FlatCC | MLIR TableGen | IREE |
+|---|---:|---:|---:|
+| Translation units | 26 | 109 | 1,620 |
+| **Total wall time** | **0.709 s** | **47.25 s** | **88.01 min** |
+| **Peak process RSS** | **122.65 MiB** | **528.39 MiB** | **19.70 GiB** |
+| AST loading | 0.328 s | 37.57 s | 50.66 min |
+| CFG/fact extraction | 0.219 s | 8.15 s | 10.84 min |
+| CG/PTA + inter-CFG and result construction | 0.007 s | 0.135 s | 24.76 min |
+| DFG construction | 0.014 s | 0.131 s | 10.84 s |
+| AST release | 0.009 s | 0.724 s | 70.30 s |
+| Unresolved call sites | 110 | 707 | 31,386 |
+
+Total time also includes input discovery and reporting; it excludes building
+the benchmark programs. Peak RSS covers the entire analyzer process. All
+selected units were parsed once and their ASTs released, with no failed CFG
+lifts. Unresolved calls and incomplete effects remain explicit in the results;
+these measurements do not establish complete linked-program coverage. Each
+entry is a single measurement, not an average over repeated trials.
+
 ## Scope and limitations
 
 - Roots determine which captured functions participate in the analysis. A
