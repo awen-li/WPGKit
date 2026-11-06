@@ -146,6 +146,9 @@ Compilation commands and linker maps selected inputs for `iree-flatcc-cli`,
 | Measurement | FlatCC | MLIR TableGen | IREE |
 |---|---:|---:|---:|
 | Translation units | 26 | 109 | 1,620 |
+| Source size (SLOC, selected source files) | 13,651 | 49,357 | 577,393 |
+| Retained function CFGs | 7,939 | 55,436 | 1,853,933 |
+| Function bodies in the inter-CFG | 646 | 9,155 | 772,039 |
 | **Total wall time** | **0.709 s** | **47.25 s** | **88.01 min** |
 | **Peak process RSS** | **122.65 MiB** | **528.39 MiB** | **19.70 GiB** |
 | AST loading | 0.328 s | 37.57 s | 50.66 min |
@@ -154,6 +157,12 @@ Compilation commands and linker maps selected inputs for `iree-flatcc-cli`,
 | DFG construction | 0.014 s | 0.131 s | 10.84 s |
 | AST release | 0.009 s | 0.724 s | 70.30 s |
 | Unresolved call sites | 110 | 707 | 31,386 |
+
+Source size counts nonblank, noncomment lines with `cloc` 1.98 in the selected
+translation-unit source files, counting each distinct file path once. It
+includes generated source files and excludes included headers. Retained CFGs
+also cover functions extracted from headers and template instantiations;
+only reached function bodies enter the inter-CFG.
 
 Total time also includes input discovery and reporting; it excludes building
 the benchmark programs. Peak RSS covers the entire analyzer process. All
