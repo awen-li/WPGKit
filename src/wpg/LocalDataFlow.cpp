@@ -98,6 +98,16 @@ public:
       return true;
     }
     const auto *assign = llvm::dyn_cast_or_null<clang::BinaryOperator>(parent);
+    const auto *unary = llvm::dyn_cast_or_null<clang::UnaryOperator>(parent);
+    const bool update = decl->getType()->isIntegerType() &&
+                        ((assign && assign->isCompoundAssignmentOp() &&
+                          assign->getLHS() == child) ||
+                         (unary && unary->isIncrementDecrementOp()));
+    if (update && sequenced(parent)) {
+      reads[decl].push_back(expr);
+      writes[decl].push_back(expr);
+      return true;
+    }
     if (assign && assign->getOpcode() == clang::BO_Assign &&
         assign->getLHS() == child && sequenced(assign)) {
       writes[decl].push_back(expr);
@@ -149,7 +159,13 @@ private:
 
   bool sequenced(const clang::Stmt *stmt) const {
     const auto *parent = parents_.getParent(stmt);
-    if (llvm::isa_and_nonnull<clang::CompoundStmt>(parent))
+    while (llvm::isa_and_nonnull<clang::ParenExpr, clang::ImplicitCastExpr,
+                                 clang::ExprWithCleanups>(parent)) {
+      stmt = parent;
+      parent = parents_.getParent(parent);
+    }
+    if (llvm::isa_and_nonnull<clang::CompoundStmt, clang::DeclStmt,
+                              clang::ReturnStmt>(parent))
       return true;
     if (const auto *branch = llvm::dyn_cast_or_null<clang::IfStmt>(parent))
       return stmt == branch->getThen() || stmt == branch->getElse();

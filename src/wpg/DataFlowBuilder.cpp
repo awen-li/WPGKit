@@ -197,14 +197,12 @@ private:
     }
   }
 
-  void connectMemory() {
+  struct MemoryPartition {
+    std::vector<std::uint32_t> parents;
+    std::map<std::uint32_t, std::uint32_t> pointees;
+    std::set<std::uint32_t> singletonPointers, summaries;
 
-    // Merge overlapping known target sets without retaining another points-to
-    // relation or materializing every store/load pair. Unknown accesses use two
-    // directional hubs, so unknown reads alone do not make known stores alias.
-    std::vector<std::uint32_t> parents(pta.nodeCount());
-    std::iota(parents.begin(), parents.end(), 0);
-    const auto root = [&](std::uint32_t node) {
+    std::uint32_t root(std::uint32_t node) {
       auto result = node;
       while (parents.at(result) != result)
         result = parents[result];
@@ -214,28 +212,49 @@ private:
         node = next;
       }
       return result;
-    };
-    std::map<std::uint32_t, std::uint32_t> pointees;
+    }
+  };
+
+  MemoryPartition partitionMemory() const {
+    MemoryPartition partition;
+    partition.parents.resize(pta.nodeCount());
+    std::iota(partition.parents.begin(), partition.parents.end(), 0);
     for (const auto &access : memory) {
       if (!access.indirect || access.pointer == NoDataIndex ||
-          pointees.contains(access.pointer))
+          partition.pointees.contains(access.pointer))
         continue;
       auto representative = NoDataIndex;
+      std::size_t count = 0;
       if (!pta.isUnknown(access.pointer))
         for (const auto object : pta.pointsTo(access.pointer)) {
+          ++count;
           if (representative == NoDataIndex)
             representative = object;
           else
-            parents[root(object)] = root(representative);
+            partition.parents[partition.root(object)] =
+                partition.root(representative);
         }
-      pointees.emplace(access.pointer, representative);
+      if (count == 1)
+        partition.singletonPointers.insert(access.pointer);
+      partition.pointees.emplace(access.pointer, representative);
     }
+    for (std::uint32_t object = 0; object < partition.parents.size(); ++object)
+      if (partition.parents[object] != object)
+        partition.summaries.insert(partition.root(object));
+    return partition;
+  }
+
+  void connectMemory() {
+    // Preserve compact dependency partitions and singleton locations
+    // separately.
+    auto partition = partitionMemory();
     std::map<std::uint32_t, DataNodeId> regions;
+    std::map<std::uint32_t, DataNodeId> exact;
     DataNodeId unknownRead, unknownWrite;
     for (const auto &access : memory) {
       auto object = access.pointer;
       if (object != NoDataIndex && access.indirect)
-        object = pointees.at(object);
+        object = partition.pointees.at(object);
       DataNodeId region;
       if (object == NoDataIndex) {
         auto &unknown = access.write ? unknownWrite : unknownRead;
@@ -246,11 +265,26 @@ private:
                        DataGapKind::UnknownAddress,
                        {}});
       } else {
-        auto [found, added] = regions.try_emplace(root(object));
+        auto [found, added] = regions.try_emplace(partition.root(object));
         if (added)
-          found->second =
-              graph->addNode({{}, DataNodeKind::Memory, root(object)});
+          found->second = graph->addNode(
+              {{}, DataNodeKind::Memory, partition.root(object)});
         region = found->second;
+        if (!access.indirect ||
+            partition.singletonPointers.contains(access.pointer)) {
+          auto [cell, added] = exact.try_emplace(object);
+          if (added) {
+            cell->second =
+                !partition.summaries.contains(partition.root(object))
+                    ? region
+                    : graph->addNode({{}, DataNodeKind::Memory, object});
+            if (cell->second != region)
+              graph->addEdge(region, cell->second, DataEdgeKind::Location);
+          }
+          graph->addEdge(access.write ? access.node : cell->second,
+                         access.write ? cell->second : access.node,
+                         DataEdgeKind::Location);
+        }
       }
       graph->addEdge(access.write ? access.node : region,
                      access.write ? region : access.node, DataEdgeKind::Memory);

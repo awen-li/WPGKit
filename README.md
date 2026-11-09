@@ -197,6 +197,14 @@ entry is a single measurement, not an average over repeated trials.
 - CFG-derived local pointer definitions distinguish supported nonescaping
   locals. Aliasable memory and DFG memory partitions retain conservative,
   flow-insensitive merging; calling contexts are merged by the solver.
+- Supported field projections use numeric base-object and field identities.
+  Constant indices of direct arrays have separate subobjects. Unknown indices,
+  unsupported address expressions, and projections deeper than eight levels
+  remain conservative. These bounds do not imply complete C++ alias modeling.
+- DFG `Location` edges preserve singleton storage identities alongside coarse
+  dependency partitions. A singleton abstract location alone does not justify
+  a strong update: clients must also establish concrete-object uniqueness.
+  Trivial record copies and named lambda captures reuse these shared facts.
 - Inter-CFG return connections carry matching IDs. A consumer that needs
   context-sensitive traversal must balance these IDs. Exception/unwinding
   connections are approximate.

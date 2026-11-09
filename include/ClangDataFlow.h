@@ -19,11 +19,16 @@ public:
   using Pointer = std::function<Andersen::Node(const clang::Expr *)>;
   using Storage = std::function<Andersen::Node(const clang::ValueDecl *)>;
   ClangDataFlow(FunctionDataFlow &facts, const LocalDataFlow &locals,
-                BodyId body, Pointer pointer, Storage storage);
+                BodyId body, Pointer pointer, Storage storage, Pointer address,
+                Storage capture);
   void statement(const clang::Stmt *statement);
   void variable(const clang::VarDecl *variable);
   void parameters(const clang::FunctionDecl &function);
-  void field(const clang::ValueDecl *field, const clang::Expr *initializer);
+  void field(std::uint32_t address, const clang::Expr *initializer);
+  void copyField(std::uint32_t source, std::uint32_t destination,
+                 const clang::Expr *expression);
+  [[nodiscard]] std::span<const std::pair<std::uint32_t, std::uint32_t>>
+  copiedFields(const clang::Expr *) const;
   void assignment(const clang::BinaryOperator *assignment);
   void increment(const clang::UnaryOperator *expression);
   void call(const clang::Expr *expression, CallSiteId site,
@@ -41,6 +46,7 @@ public:
   [[nodiscard]] const DataCall *callFacts(CallSiteId site) const;
   [[nodiscard]] std::uint32_t
   variableNode(const clang::VarDecl *variable) const;
+  [[nodiscard]] std::uint32_t fieldNode(const clang::Expr *initializer) const;
 
 private:
   std::uint32_t node(const clang::Stmt *statement);
@@ -54,10 +60,17 @@ private:
       nullptr; // Borrowed for this body only.
   BodyId body_;
   Pointer pointer_;
+  Pointer address_;
   Storage storage_;
+  Storage capture_;
+  std::map<const clang::VarDecl *, std::uint32_t> captures_;
   std::map<const clang::Stmt *, std::uint32_t> nodes_;
   std::set<const clang::Stmt *> observed_;
   std::map<CallSiteId, std::size_t> calls_;
+  std::map<const clang::Expr *, std::uint32_t> fields_;
+  std::map<const clang::Expr *,
+           std::vector<std::pair<std::uint32_t, std::uint32_t>>>
+      copies_;
 };
 
 } // namespace wpgkit

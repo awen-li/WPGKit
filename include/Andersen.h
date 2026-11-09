@@ -7,6 +7,8 @@
 #include <deque>
 #include <iterator>
 #include <limits>
+#include <map>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -24,7 +26,8 @@ public:
     Store,
     TaintUnknown,
     Unknown,
-    Havoc
+    Havoc,
+    Project
   };
 
   struct Fact final {
@@ -80,6 +83,9 @@ public:
   void copy(Node destination, Node source);    // p = q
   void load(Node destination, Node pointer);   // p = *q
   void store(Node pointer, Node source);       // *p = q
+  // Address of a field relative to each possible base object. The field key
+  // is a stable numeric declaration identity; no AST is retained.
+  Node project(Node basePointer, Node field);
   void taintUnknown(Node destination,
                     Node source); // unknown base may hide a field value
   void markUnknown(Node node);
@@ -158,7 +164,7 @@ public:
   }
 
 private:
-  enum class Kind { Copy, Load, Store, TaintUnknown, Havoc };
+  enum class Kind { Copy, Load, Store, TaintUnknown, Havoc, Project };
 
   struct Constraint {
     Kind kind;
@@ -186,6 +192,11 @@ private:
   void enqueueUsers(Node node);
   void addConstraint(Kind kind, Node destination, Node source);
   void process(std::size_t constraint);
+  void projectTargets(Node destination, Node source);
+  std::optional<Node> subobject(Node base, Node field);
+  std::map<Node, Node> projectionFields_;
+  std::map<std::pair<Node, Node>, Node> subobjects_;
+  std::map<Node, unsigned> subobjectDepths_;
   // Growing the node inventory must not copy every existing points-to set.
   std::deque<State> nodes_;
   std::vector<Node>

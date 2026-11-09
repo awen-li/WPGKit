@@ -149,6 +149,51 @@ void memoryFlow() {
         "dynamic global initialization retains unknown memory effects");
 }
 
+void scalarUpdates() {
+  const auto program = fixture(
+      "int entry(int a,int b){int x=a; int old=x++; x*=b; return x+old;}");
+  const auto inputs = nodes(program, DataNodeKind::Parameter);
+  const auto output = nodes(program, DataNodeKind::Return).at(0);
+  check(program.dataFlow->gaps().empty() &&
+            path(*program.dataFlow, inputs.at(0), output) &&
+            path(*program.dataFlow, inputs.at(1), output),
+        "scalar updates retain both read and write dependencies");
+  const auto overwritten =
+      fixture("int entry(int a,int b){int x=a; ++x; x=b; return x;}");
+  const auto params = nodes(overwritten, DataNodeKind::Parameter);
+  const auto result = nodes(overwritten, DataNodeKind::Return).at(0);
+  check(!path(*overwritten.dataFlow, params.at(0), result) &&
+            path(*overwritten.dataFlow, params.at(1), result),
+        "overwriting an incremented scalar kills the prior definition");
+}
+
+void fieldIdentity() {
+  const auto program = fixture(R"cpp(
+    struct Pair { int first, second; };
+    int entry(int a, int b) {
+      Pair left{a, a};
+      Pair right{b, b};
+      Pair *alias = &left;
+      return alias->first;
+    }
+  )cpp");
+  const auto inputs = nodes(program, DataNodeKind::Parameter);
+  const auto output = nodes(program, DataNodeKind::Return).at(0);
+  check(
+      path(*program.dataFlow, inputs.at(0), output) &&
+          !path(*program.dataFlow, inputs.at(1), output),
+      "field dependencies retain base object identity through pointer aliases");
+  const auto fields = fixture(R"cpp(
+    struct Pair { int first, second; };
+    int entry(int a, int b) { Pair pair{a, b}; return pair.first; }
+  )cpp");
+  const auto parameters = nodes(fields, DataNodeKind::Parameter);
+  const auto returned = nodes(fields, DataNodeKind::Return).at(0);
+  check(path(*fields.dataFlow, parameters.at(0), returned) &&
+            !path(*fields.dataFlow, parameters.at(1), returned),
+        "different fields of the same object remain distinct");
+}
+
 void calls() {
   const auto direct = fixture(
       "int choose(int a,int b){return b;} int entry(int a,int b){return choose(a,b);}");
@@ -390,6 +435,8 @@ void snapshots() {
 } // namespace
 
 int main() {
+  fieldIdentity();
+  scalarUpdates();
   localFlow();
   memoryFlow();
   calls();

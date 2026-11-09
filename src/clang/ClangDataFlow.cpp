@@ -14,9 +14,11 @@ const clang::Stmt *canonical(const clang::Stmt *statement) {
 
 ClangDataFlow::ClangDataFlow(FunctionDataFlow &facts,
                              const LocalDataFlow &locals, BodyId body,
-                             Pointer pointer, Storage storage)
+                             Pointer pointer, Storage storage, Pointer address,
+                             Storage capture)
     : facts_(facts), locals_(locals), body_(body), pointer_(std::move(pointer)),
-      storage_(std::move(storage)) {}
+      address_(std::move(address)), storage_(std::move(storage)),
+      capture_(std::move(capture)) {}
 
 std::uint32_t
 ClangDataFlow::expressionNode(const clang::Expr *expression) const {
@@ -35,6 +37,8 @@ const DataCall *ClangDataFlow::callFacts(CallSiteId site) const {
 
 std::uint32_t
 ClangDataFlow::variableNode(const clang::VarDecl *variable) const {
+  if (const auto found = captures_.find(variable); found != captures_.end())
+    return found->second;
   if (const auto *parameter = llvm::dyn_cast<clang::ParmVarDecl>(variable)) {
     if (parameter->getDeclContext() != function_)
       return NoDataIndex;
@@ -51,6 +55,21 @@ ClangDataFlow::variableNode(const clang::VarDecl *variable) const {
 
 void ClangDataFlow::parameters(const clang::FunctionDecl &function) {
   function_ = &function;
+  if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(&function);
+      method && method->getParent()->isLambda()) {
+    llvm::DenseMap<const clang::ValueDecl *, clang::FieldDecl *> fields;
+    clang::FieldDecl *thisField = nullptr;
+    method->getParent()->getCaptureFields(fields, thisField);
+    for (const auto &[variable, field] : fields) {
+      const auto *decl = llvm::dyn_cast<clang::VarDecl>(variable);
+      if (!decl)
+        continue;
+      const auto captured =
+          facts_.addNode({{body_, {}, 0}, DataNodeKind::Value, 0});
+      captures_.emplace(decl, captured);
+      facts_.memory.push_back({captured, capture_(decl), true, false});
+    }
+  }
   for (const auto *param : function.parameters())
     if (!locals_.refines(param))
       facts_.memory.push_back(
@@ -100,8 +119,8 @@ void ClangDataFlow::memory(const clang::Expr *expression, std::uint32_t event,
   } else if (const auto *member =
                  llvm::dyn_cast<clang::MemberExpr>(expression)) {
     if (llvm::isa<clang::FieldDecl>(member->getMemberDecl())) {
-      pointer = storage_(member->getMemberDecl());
-      indirect = member->getMemberDecl()->getType()->isReferenceType();
+      pointer = address_(member);
+      indirect = true;
     }
   } else if (const auto *unary =
                  llvm::dyn_cast<clang::UnaryOperator>(expression);
@@ -109,7 +128,7 @@ void ClangDataFlow::memory(const clang::Expr *expression, std::uint32_t event,
     pointer = pointer_(unary->getSubExpr());
   } else if (const auto *subscript =
                  llvm::dyn_cast<clang::ArraySubscriptExpr>(expression)) {
-    pointer = pointer_(subscript->getBase());
+    pointer = address_(subscript);
   }
   facts_.memory.push_back({event, pointer, indirect, write});
 }
@@ -178,9 +197,38 @@ void ClangDataFlow::variable(const clang::VarDecl *variable) {
   }
 }
 
-void ClangDataFlow::field(const clang::ValueDecl *field,
+void ClangDataFlow::field(std::uint32_t address,
                           const clang::Expr *initializer) {
-  facts_.memory.push_back({node(initializer), storage_(field), false, true});
+  const auto input = node(initializer);
+  const auto event = facts_.addNode(
+      {facts_.nodes[input].position, DataNodeKind::Definition, 0});
+  facts_.values.emplace_back(input, event);
+  fields_[initializer] = event;
+  facts_.memory.push_back({event, address, true, true});
+}
+
+std::uint32_t ClangDataFlow::fieldNode(const clang::Expr *initializer) const {
+  const auto found = fields_.find(initializer);
+  return found == fields_.end() ? NoDataIndex : found->second;
+}
+
+void ClangDataFlow::copyField(std::uint32_t source, std::uint32_t destination,
+                              const clang::Expr *expression) {
+  const auto position = facts_.nodes[node(expression)].position;
+  const auto read = facts_.addNode({position, DataNodeKind::Value, 0});
+  const auto write = facts_.addNode({position, DataNodeKind::Definition, 0});
+  facts_.memory.push_back({read, source, true, false});
+  facts_.memory.push_back({write, destination, true, true});
+  facts_.values.emplace_back(read, write);
+  copies_[expression].emplace_back(read, write);
+}
+
+std::span<const std::pair<std::uint32_t, std::uint32_t>>
+ClangDataFlow::copiedFields(const clang::Expr *expression) const {
+  const auto found = copies_.find(expression);
+  return found == copies_.end()
+             ? std::span<const std::pair<std::uint32_t, std::uint32_t>>{}
+             : found->second;
 }
 
 void ClangDataFlow::assignment(const clang::BinaryOperator *assignment) {
@@ -197,8 +245,16 @@ void ClangDataFlow::assignment(const clang::BinaryOperator *assignment) {
 }
 
 void ClangDataFlow::increment(const clang::UnaryOperator *expression) {
-  if (expression->isIncrementDecrementOp())
-    memory(expression->getSubExpr(), node(expression), true);
+  if (!expression->isIncrementDecrementOp())
+    return;
+  const auto event = node(expression);
+  const auto *operand = expression->getSubExpr()->IgnoreParenImpCasts();
+  if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(operand))
+    if (const auto definition = locals_.write(ref).data) {
+      facts_.values.emplace_back(event, *definition);
+      return;
+    }
+  memory(operand, event, true);
 }
 
 void ClangDataFlow::call(const clang::Expr *expression, CallSiteId site,
@@ -218,6 +274,11 @@ void ClangDataFlow::call(const clang::Expr *expression, CallSiteId site,
     result = facts_.addNode({position, DataNodeKind::CallResult, 0});
   }
   facts_.nodes[result].kind = DataNodeKind::CallResult;
+  if (const auto *assignment =
+          llvm::dyn_cast<clang::CXXOperatorCallExpr>(expression);
+      assignment && assignment->getOperator() == clang::OO_Equal &&
+      assignment->getNumArgs() == 2)
+    memory(assignment->getArg(0), result, true);
   DataCall call{site, result, {}, std::move(pointers), receiver};
   for (const auto *arg : arguments) {
     const auto argument =

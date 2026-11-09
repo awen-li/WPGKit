@@ -249,6 +249,7 @@ struct Function final {
   ExternalModel model = ExternalModel::Unknown;
   std::set<TextId> linkage;
   std::vector<Param> params;
+  std::optional<Andersen::Node> receiver;
   std::unique_ptr<BodyFacts> body;
   std::vector<std::size_t> callers;
   std::size_t connectedCallers = 0;
@@ -522,6 +523,13 @@ private:
   Andersen::Node returnNode(FunctionId function);
   Andersen::Node unknownValue(const char *reason);
   Andersen::Node fieldNode(const clang::MemberExpr *member, FunctionId caller);
+  Andersen::Node arrayIndex(std::uint64_t index);
+  Andersen::Node fieldAddress(const clang::MemberExpr *member,
+                              FunctionId caller);
+  Andersen::Node receiverNode(FunctionId function);
+  Andersen::Node captureAddress(const clang::ValueDecl *, FunctionId);
+  void initializeLambda(const clang::VarDecl &, const clang::LambdaExpr &,
+                        FunctionId);
   Andersen::Node addressOf(const clang::Expr *expr, FunctionId caller);
   Andersen::Node value(const clang::Expr *expr, FunctionId caller);
   Andersen::Node extractValue(const clang::Expr *expr, FunctionId caller);
@@ -574,6 +582,10 @@ private:
               FunctionId caller);
   bool writePointer(const clang::Expr *left, Andersen::Node source,
                     FunctionId caller, bool refineLocal);
+  void copyAggregate(Andersen::Node destination, Andersen::Node source,
+                     const clang::CXXRecordDecl &, const clang::Expr *);
+  void initializeFields(Andersen::Node, const clang::CXXRecordDecl &,
+                        const clang::InitListExpr &, FunctionId);
   void initializeAggregate(const clang::VarDecl *decl, FunctionId caller);
   void invalidatePointer(const clang::Expr *left, const char *reason,
                          FunctionId caller);
@@ -599,6 +611,8 @@ private:
   CFGFactObserver captureFacts_; // Borrowed native storage; current body only.
   std::shared_ptr<const DataFlowGraph> dataFlow_;
   std::map<const clang::Expr *, Andersen::Node> pointerValues_;
+  std::map<std::uint64_t, Andersen::Node> arrayIndices_;
+  std::set<const clang::LambdaExpr *> initializedLambdas_;
   std::size_t cfgLocalVariables_ = 0, cfgLocalFallbacks_ = 0;
   std::shared_ptr<InterCFG> interCFG_;
   bool overlayMayChange_ = true;
@@ -824,26 +838,52 @@ Andersen::Node Engine::unknownValue(const char *reason) {
   return node;
 }
 
-Andersen::Node Engine::fieldNode(const clang::MemberExpr *member,
-                                 FunctionId caller) {
+Andersen::Node Engine::receiverNode(FunctionId id) {
+  auto &function = functionAt(id);
+  if (!function.receiver)
+    function.receiver = pta_.addNode();
+  return *function.receiver;
+}
+
+Andersen::Node Engine::captureAddress(const clang::ValueDecl *variable,
+                                      FunctionId caller) {
+  const auto *method =
+      llvm::dyn_cast_or_null<clang::CXXMethodDecl>(activeDefinition_);
+  if (method && method->getParent()->isLambda()) {
+    llvm::DenseMap<const clang::ValueDecl *, clang::FieldDecl *> fields;
+    clang::FieldDecl *thisField = nullptr;
+    method->getParent()->getCaptureFields(fields, thisField);
+    if (const auto found = fields.find(variable); found != fields.end())
+      return pta_.project(receiverNode(caller), nodeFor(found->second));
+  }
+  return unknownValue("capture field unavailable");
+}
+
+Andersen::Node Engine::arrayIndex(std::uint64_t index) {
+  auto [found, added] = arrayIndices_.try_emplace(index);
+  if (added)
+    found->second = pta_.addNode();
+  return found->second;
+}
+
+Andersen::Node Engine::fieldAddress(const clang::MemberExpr *member,
+                                    FunctionId caller) {
   const auto *field = llvm::dyn_cast<clang::FieldDecl>(member->getMemberDecl());
   if (!field)
     return unknownValue("unsupported member expression");
-  const auto node = nodeFor(field);
+  if (field->getParent()->isUnion())
+    field = *field->getParent()->field_begin();
   const auto *base = member->getBase()->IgnoreParenImpCasts();
-  if (member->isArrow()) {
-    pta_.taintUnknown(node, value(base, caller));
-  } else if (const auto *deref = llvm::dyn_cast<clang::UnaryOperator>(base);
-             deref && deref->getOpcode() == clang::UO_Deref) {
-    pta_.taintUnknown(node, value(deref->getSubExpr(), caller));
-  } else if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(base);
-             ref && (llvm::isa<clang::ParmVarDecl>(ref->getDecl()) ||
-                     ref->getDecl()->getType()->isReferenceType())) {
-    pta_.markUnknown(node);
-  } else if (!llvm::isa<clang::DeclRefExpr>(base)) {
-    pta_.markUnknown(node);
-  }
-  return node;
+  return pta_.project(member->isArrow() ? value(base, caller)
+                                        : addressOf(base, caller),
+                      nodeFor(field));
+}
+
+Andersen::Node Engine::fieldNode(const clang::MemberExpr *member,
+                                 FunctionId caller) {
+  const auto result = pta_.addNode();
+  pta_.load(result, fieldAddress(member, caller));
+  return result;
 }
 
 Andersen::Node Engine::addressOf(const clang::Expr *expr, FunctionId caller) {
@@ -864,10 +904,22 @@ Andersen::Node Engine::addressOf(const clang::Expr *expr, FunctionId caller) {
             llvm::dyn_cast<clang::FieldDecl>(member->getMemberDecl())) {
       if (field->getType()->isReferenceType())
         return fieldNode(member, caller);
-      const auto result = pta_.addNode();
-      pta_.address(result, fieldNode(member, caller));
-      return result;
+      return fieldAddress(member, caller);
     }
+  }
+  if (const auto *array = llvm::dyn_cast<clang::ArraySubscriptExpr>(expr)) {
+    const auto *base = array->getBase()->IgnoreParenImpCasts();
+    clang::Expr::EvalResult index;
+    const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(base);
+    if (ref && base->getType()->isArrayType() &&
+        array->getIdx()->EvaluateAsInt(index,
+                                       ref->getDecl()->getASTContext()) &&
+        !index.HasSideEffects && !index.HasUndefinedBehavior &&
+        index.Val.getInt().isNonNegative() &&
+        index.Val.getInt().getActiveBits() <= 64)
+      return pta_.project(addressOf(base, caller),
+                          arrayIndex(index.Val.getInt().getZExtValue()));
+    return unknownValue("unknown array subobject");
   }
   if (const auto *deref = llvm::dyn_cast<clang::UnaryOperator>(expr);
       deref && deref->getOpcode() == clang::UO_Deref)
@@ -906,7 +958,8 @@ Andersen::Node Engine::extractValue(const clang::Expr *expr,
         expr = cast->getSubExpr();
         break;
       case clang::CK_ArrayToPointerDecay:
-        return addressOf(cast->getSubExpr(), caller);
+        return pta_.project(addressOf(cast->getSubExpr(), caller),
+                            arrayIndex(0));
       default:
         return unknownValue("unsupported pointer cast");
       }
@@ -926,6 +979,8 @@ Andersen::Node Engine::extractValue(const clang::Expr *expr,
 
 Andersen::Node Engine::expressionValue(const clang::Expr *expr,
                                        FunctionId caller) {
+  if (llvm::isa<clang::CXXThisExpr>(expr) && caller.isValid())
+    return receiverNode(caller);
   if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(expr)) {
     if (const auto *function =
             llvm::dyn_cast<clang::FunctionDecl>(ref->getDecl())) {
@@ -947,10 +1002,16 @@ Andersen::Node Engine::expressionValue(const clang::Expr *expr,
         node); // Shared fallback, not a local SSA value.
     return node;
   }
+  if (llvm::isa<clang::ArraySubscriptExpr>(expr)) {
+    const auto result = pta_.addNode();
+    pta_.load(result, addressOf(expr, caller));
+    return result;
+  }
   if (const auto *member = llvm::dyn_cast<clang::MemberExpr>(expr)) {
     if (const auto *field =
             llvm::dyn_cast<clang::FieldDecl>(member->getMemberDecl())) {
-      // Field-insensitive: all instances share one may-points-to set.
+      // Field cells are relative to each base object; pointer contents remain
+      // MAY sets.
       const auto node = fieldNode(member, caller);
       if (field->getType()->isReferenceType() &&
           member->getType()->isPointerType()) {
@@ -964,7 +1025,7 @@ Andersen::Node Engine::expressionValue(const clang::Expr *expr,
   if (const auto *unary = llvm::dyn_cast<clang::UnaryOperator>(expr)) {
     if (unary->getOpcode() == clang::UO_AddrOf) {
       const auto *operand = unary->getSubExpr()->IgnoreParenImpCasts();
-      if (llvm::isa<clang::DeclRefExpr>(operand))
+      if (llvm::isa<clang::DeclRefExpr, clang::ArraySubscriptExpr>(operand))
         return addressOf(operand, caller);
       if (const auto *member = llvm::dyn_cast<clang::MemberExpr>(operand);
           member && llvm::isa<clang::FieldDecl>(member->getMemberDecl()))
@@ -1037,14 +1098,15 @@ bool Engine::writePointer(const clang::Expr *left, Andersen::Node source,
     }
   } else if (const auto *member = llvm::dyn_cast<clang::MemberExpr>(left);
              member && llvm::isa<clang::FieldDecl>(member->getMemberDecl())) {
-    const auto node = fieldNode(member, caller);
-    if (member->getMemberDecl()->getType()->isReferenceType())
-      pta_.store(node, source);
-    else
-      pta_.copy(node, source);
+    const auto node = member->getMemberDecl()->getType()->isReferenceType()
+                          ? fieldNode(member, caller)
+                          : fieldAddress(member, caller);
+    pta_.store(node, source);
   } else if (const auto *deref = llvm::dyn_cast<clang::UnaryOperator>(left);
              deref && deref->getOpcode() == clang::UO_Deref) {
     pta_.store(value(deref->getSubExpr(), caller), source);
+  } else if (llvm::isa<clang::ArraySubscriptExpr>(left)) {
+    pta_.store(addressOf(left, caller), source);
   } else if (const auto *call = llvm::dyn_cast<clang::CallExpr>(left);
              call && call->isGLValue()) {
     pta_.store(addressOf(call, caller), source);
@@ -1061,15 +1123,128 @@ void Engine::invalidatePointer(const clang::Expr *left, const char *reason,
   writePointer(left, unknownValue(reason), caller, /*refineLocal=*/false);
 }
 
+void Engine::copyAggregate(Andersen::Node destination, Andersen::Node source,
+                           const clang::CXXRecordDecl &record,
+                           const clang::Expr *expression) {
+  if (record.isUnion() || record.getNumBases()) {
+    pta_.havoc(destination);
+    return;
+  }
+  for (const auto *field : record.fields()) {
+    const auto to = pta_.project(destination, nodeFor(field));
+    const auto from = pta_.project(source, nodeFor(field));
+    if (dataCapture_)
+      dataCapture_->copyField(from, to, expression);
+    if (const auto *nested = field->getType()->getAsCXXRecordDecl()) {
+      copyAggregate(to, from, *nested, expression);
+      continue;
+    }
+    if (field->getType()->isPointerType() ||
+        field->getType()->isReferenceType()) {
+      const auto contents = pta_.addNode();
+      pta_.load(contents, from);
+      pta_.store(to, contents);
+    }
+  }
+}
+
+void Engine::initializeFields(Andersen::Node base,
+                              const clang::CXXRecordDecl &record,
+                              const clang::InitListExpr &list,
+                              FunctionId caller) {
+  if (record.isUnion() || record.getNumBases()) {
+    pta_.havoc(base);
+    return;
+  }
+  unsigned index = 0;
+  for (const auto *field : record.fields()) {
+    if (index >= list.getNumInits())
+      break;
+    const auto *initial = list.getInit(index++);
+    const auto address = pta_.project(base, nodeFor(field));
+    if (const auto *nested = llvm::dyn_cast<clang::InitListExpr>(initial)) {
+      if (const auto *type = field->getType()->getAsCXXRecordDecl()) {
+        initializeFields(address, *type, *nested, caller);
+        continue;
+      }
+    }
+    if (dataCapture_)
+      dataCapture_->field(address, initial);
+    if (field->getType()->isPointerType())
+      pta_.store(address, value(initial, caller));
+    else if (field->getType()->isReferenceType())
+      pta_.store(address, addressOf(initial, caller));
+  }
+}
+
+void Engine::initializeLambda(const clang::VarDecl &variable,
+                              const clang::LambdaExpr &lambda,
+                              FunctionId caller) {
+  llvm::DenseMap<const clang::ValueDecl *, clang::FieldDecl *> fields;
+  clang::FieldDecl *thisField = nullptr;
+  lambda.getLambdaClass()->getCaptureFields(fields, thisField);
+  const auto base = pta_.addNode();
+  pta_.address(base, nodeFor(&variable));
+  auto initial = lambda.capture_init_begin();
+  for (const auto &capture : lambda.captures()) {
+    const auto *valueExpr = *initial++;
+    const auto *field = capture.capturesVariable()
+                            ? fields.lookup(capture.getCapturedVar())
+                            : thisField;
+    if (!field || !valueExpr) {
+      unknownMemoryEffects_ = true;
+      continue;
+    }
+    const auto address = pta_.project(base, nodeFor(field));
+    if (dataCapture_)
+      dataCapture_->field(address, valueExpr);
+    if (field->getType()->isReferenceType())
+      pta_.store(address, addressOf(valueExpr, caller));
+    else if (field->getType()->isPointerType())
+      pta_.store(address, value(valueExpr, caller));
+    else if (field->getType()->isRecordType())
+      pta_.havoc(address);
+  }
+  initializedLambdas_.insert(&lambda);
+}
+
 void Engine::initializeAggregate(const clang::VarDecl *decl,
                                  FunctionId caller) {
+  if (const auto *lambda =
+          llvm::dyn_cast_or_null<clang::LambdaExpr>(decl->getInit())) {
+    initializeLambda(*decl, *lambda, caller);
+    return;
+  }
   const auto *record = decl->getType()->getAsCXXRecordDecl();
   const auto *list = decl->getInit()
                          ? llvm::dyn_cast<clang::InitListExpr>(
                                decl->getInit()->IgnoreParenImpCasts())
                          : nullptr;
+  if (list && decl->getType()->isArrayType()) {
+    const auto base = pta_.addNode();
+    pta_.address(base, nodeFor(decl));
+    for (unsigned index = 0; index < list->getNumInits(); ++index) {
+      const auto address = pta_.project(base, arrayIndex(index));
+      const auto *initial = list->getInit(index);
+      if (dataCapture_)
+        dataCapture_->field(address, initial);
+      if (initial->getType()->isPointerType())
+        pta_.store(address, value(initial, caller));
+    }
+    return;
+  }
   if (!record)
     return;
+  const auto *copy =
+      llvm::dyn_cast_or_null<clang::CXXConstructExpr>(decl->getInit());
+  if (copy && copy->getConstructor()->isTrivial() &&
+      copy->getConstructor()->isCopyOrMoveConstructor() &&
+      copy->getNumArgs() == 1) {
+    const auto base = pta_.addNode();
+    pta_.address(base, nodeFor(decl));
+    copyAggregate(base, addressOf(copy->getArg(0), caller), *record, copy);
+    return;
+  }
   if (!list) {
     if (!caller.isValid() && decl->hasInit())
       for (const auto *field : record->fields())
@@ -1080,25 +1255,9 @@ void Engine::initializeAggregate(const clang::VarDecl *decl,
         }
     return;
   }
-  if (record->getNumBases() != 0 || record->isUnion()) {
-    limitations_.insert(
-        metadata_.intern("aggregate base or union initializer not modeled"));
-    unknownMemoryEffects_ = true;
-    return;
-  }
-  unsigned index = 0;
-  for (const auto *field : record->fields()) {
-    if (index >= list->getNumInits())
-      break;
-    if (dataCapture_)
-      dataCapture_->field(field, list->getInit(index));
-    if (field->getType()->isPointerType())
-      pta_.copy(nodeFor(field), value(list->getInit(index), caller));
-    else if (field->getType()->isReferenceType() &&
-             field->getType()->getPointeeType()->isPointerType())
-      pta_.copy(nodeFor(field), addressOf(list->getInit(index), caller));
-    ++index;
-  }
+  const auto base = pta_.addNode();
+  pta_.address(base, nodeFor(decl));
+  initializeFields(base, *record, *list, caller);
 }
 
 std::size_t Engine::site(const clang::CallExpr *expr, FunctionId caller) {
@@ -1196,6 +1355,11 @@ std::size_t Engine::site(const clang::Expr *expr,
       sites_[index].receiver = object->getType()->isPointerType()
                                    ? value(object, caller)
                                    : addressOf(object, caller);
+  if (const auto *op = llvm::dyn_cast<clang::CXXOperatorCallExpr>(expr))
+    if (const auto *method =
+            llvm::dyn_cast_or_null<clang::CXXMethodDecl>(callee);
+        method && !method->isStatic() && op->getNumArgs())
+      sites_[index].receiver = addressOf(op->getArg(0), caller);
   if (const auto *direct = callee) {
     sites_[index].direct = true;
     sites_[index].unresolved |= resolved.virtualDispatch;
@@ -1229,6 +1393,17 @@ std::size_t Engine::site(const clang::Expr *expr,
       pointers.push_back(arg.kind == ParamKind::Other ? NoDataIndex : arg.node);
     dataCapture_->call(expr, CallSiteId{index + 1}, args, std::move(pointers),
                        sites_[index].receiver.value_or(NoDataIndex), callee);
+  }
+  if (const auto *assignment = llvm::dyn_cast<clang::CXXOperatorCallExpr>(expr);
+      assignment && assignment->getOperator() == clang::OO_Equal &&
+      assignment->getNumArgs() == 2) {
+    const auto *method = llvm::dyn_cast_or_null<clang::CXXMethodDecl>(callee);
+    if (method && method->isTrivial() &&
+        (method->isCopyAssignmentOperator() ||
+         method->isMoveAssignmentOperator()))
+      copyAggregate(addressOf(assignment->getArg(0), caller),
+                    addressOf(assignment->getArg(1), caller),
+                    *method->getParent(), expr);
   }
   return index;
 }
@@ -1391,6 +1566,12 @@ void Engine::activate(FunctionId callee) {
                                            function.body->cfg);
     }
     // The new connection drives these sparse actual/formal and return links.
+    if (function.receiver) {
+      if (site.receiver)
+        pta_.copy(*function.receiver, *site.receiver);
+      else
+        pta_.markUnknown(*function.receiver);
+    }
     const auto count = std::min(site.args.size(), function.params.size());
     for (std::size_t i = 0; i < count; ++i) {
       const auto &actual = site.args[i];
@@ -1720,6 +1901,17 @@ bool Engine::Body::TraverseUnaryExprOrTypeTraitExpr(
 }
 
 bool Engine::Body::VisitVarDecl(clang::VarDecl *decl) {
+  clang::Expr *initial = decl->getInit();
+  if (auto *cleanup = llvm::dyn_cast_or_null<clang::ExprWithCleanups>(initial))
+    initial = cleanup->getSubExpr();
+  if (auto *construct =
+          llvm::dyn_cast_or_null<clang::CXXConstructExpr>(initial)) {
+    const auto site = constructionSite(construct);
+    const auto address = engine_.pta_.addNode();
+    engine_.pta_.address(address, engine_.nodeFor(decl));
+    engine_.sites_[site].receiver = address;
+    engine_.sites_[site].localConstruction = true;
+  }
   if (engine_.dataCapture_)
     engine_.dataCapture_->variable(decl);
   if (const auto *record = decl->getType()->getAsCXXRecordDecl();
@@ -1910,12 +2102,15 @@ bool Engine::Body::VisitDeclRefExpr(clang::DeclRefExpr *expr) {
 }
 
 bool Engine::Body::TraverseLambdaExpr(clang::LambdaExpr *expr) {
-  if (expr->capture_size() != 0) {
-    engine_.limitations_.insert(
-        engine_.metadata_.intern("lambda capture effects not modeled"));
+  if (expr->capture_size() && !engine_.initializedLambdas_.contains(expr)) {
+    engine_.limitations_.insert(engine_.metadata_.intern(
+        "temporary lambda capture storage not modeled"));
     engine_.unknownMemoryEffects_ = true;
   }
-  return true;
+  for (auto *initial : expr->capture_inits())
+    if (!TraverseStmt(initial))
+      return false;
+  return true; // The call operator has its own CFG and extraction scope.
 }
 
 void Engine::extractBody(const clang::FunctionDecl &definition,
@@ -1925,14 +2120,15 @@ void Engine::extractBody(const clang::FunctionDecl &definition,
     for (const auto *initializer : constructor->inits()) {
       if (initializer->isMemberInitializer()) {
         const auto *field = initializer->getMember();
+        const auto address =
+            pta_.project(receiverNode(function), nodeFor(field));
         if (dataCapture_)
-          dataCapture_->field(field, initializer->getInit());
+          dataCapture_->field(address, initializer->getInit());
         if (field->getType()->isPointerType())
-          pta_.copy(nodeFor(field), value(initializer->getInit(), function));
+          pta_.store(address, value(initializer->getInit(), function));
         else if (field->getType()->isReferenceType() &&
                  field->getType()->getPointeeType()->isPointerType())
-          pta_.copy(nodeFor(field),
-                    addressOf(initializer->getInit(), function));
+          pta_.store(address, addressOf(initializer->getInit(), function));
       }
       Body(*this, function).TraverseStmt(initializer->getInit());
     }
@@ -1964,7 +2160,13 @@ void Engine::extractFunctionFacts(const clang::FunctionDecl &definition,
         [this, function](const clang::Expr *expr) {
           return value(expr, function);
         },
-        [this](const clang::ValueDecl *decl) { return nodeFor(decl); });
+        [this](const clang::ValueDecl *decl) { return nodeFor(decl); },
+        [this, function](const clang::Expr *expr) {
+          return addressOf(expr, function);
+        },
+        [this, function](const clang::ValueDecl *decl) {
+          return captureAddress(decl, function);
+        });
     dataCapture_->parameters(definition);
   }
   extractBody(definition, function);
@@ -2106,6 +2308,7 @@ void Engine::finishCFGCapture(llvm::Expected<FunctionCFG> graph,
   siteByExpr_.clear();
   siteByDecl_.clear();
   pointerValues_.clear();
+  initializedLambdas_.clear();
   unevaluated_.clear();
   if (graph) {
     captured->graph.emplace(std::move(*graph));
@@ -2155,6 +2358,7 @@ void Engine::extract(clang::ASTContext &unit) {
       initializeAggregate(global, FunctionId{});
   }
   pointerValues_.clear();
+  initializedLambdas_.clear();
   auto globalBatch = pta_.endCapture();
   globalFacts_.insert(globalFacts_.end(), globalBatch.begin(),
                       globalBatch.end());
@@ -2169,6 +2373,9 @@ void Engine::extract(clang::ASTContext &unit) {
     auto &function = functionAt(id);
     if (function.body)
       continue;
+    if (const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(definition);
+        method && !method->isStatic())
+      receiverNode(id);
     for (const auto *param : definition->parameters()) {
       const auto kind = paramKind(param->getType());
       function.params.push_back(
@@ -2208,6 +2415,7 @@ void Engine::extract(clang::ASTContext &unit) {
   siteByExpr_.clear();
   siteByDecl_.clear();
   pointerValues_.clear();
+  initializedLambdas_.clear();
   activeUnitId_ = {};
 }
 
@@ -2273,6 +2481,8 @@ llvm::Error Engine::beginRun(const std::vector<std::string> &roots,
     auto &function = functionAt(root);
     if (!function.root) {
       function.root = true;
+      if (function.receiver)
+        pta_.markUnknown(*function.receiver);
       markBodyDirty(root);
       if (reached_.insert(root).second)
         enqueueFunction(root);

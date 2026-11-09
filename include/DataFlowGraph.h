@@ -26,7 +26,10 @@ enum class DataEdgeKind : std::uint8_t {
   ActualFormal,
   Return,
   Memory,
-  Summary
+  Summary,
+  // A precise singleton storage access, or a partition-to-subobject relation.
+  // Dependency edges still use Memory; clients doing updates inspect Location.
+  Location
 };
 enum class DataGapKind : std::uint8_t {
   MissingCFG,

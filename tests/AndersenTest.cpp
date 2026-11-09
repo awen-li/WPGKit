@@ -311,6 +311,8 @@ public:
         case Andersen::FactKind::Havoc:
           set(havoc_[d]);
           break;
+        case Andersen::FactKind::Project:
+          std::abort(); // Field projections have separate object-aware tests.
         }
       }
       for (unsigned pointer = 0; pointer < targets_.size(); ++pointer) {
@@ -348,7 +350,60 @@ private:
   bool unknownStore_ = false;
 };
 
+static int fieldTests() {
+  Andersen pta;
+  const auto a = pta.addNode(), b = pta.addNode(), field = pta.addNode();
+  const auto pa = pta.addNode(), pb = pta.addNode(), alias = pta.addNode();
+  const auto f = pta.addNode(), g = pta.addNode(), value = pta.addNode();
+  pta.beginCapture();
+  pta.address(pa, a);
+  pta.address(pb, b);
+  pta.copy(alias, pa);
+  const auto left = pta.project(pa, field), right = pta.project(pb, field);
+  const auto throughAlias = pta.project(alias, field);
+  pta.address(value, f);
+  pta.store(left, value);
+  const auto read = pta.addNode(), other = pta.addNode();
+  pta.load(read, throughAlias);
+  pta.load(other, right);
+  const auto facts = pta.endCapture();
+  pta.replay(facts);
+  if (!pta.solve() || !pta.mayPointTo(read, f) || pta.mayPointTo(other, f))
+    return 1;
+  pta.address(alias, b);
+  pta.address(value, g);
+  pta.store(right, value);
+  if (!pta.solve() || !pta.mayPointTo(read, g) ||
+      pta.targetCount(throughAlias) != 2)
+    return 1;
+  pta.havoc(pa);
+  if (!pta.solve() || !pta.isUnknown(read) || pta.isUnknown(other))
+    return 1;
+  const auto nested = pta.project(left, field);
+  const auto loaded = pta.addNode();
+  pta.load(loaded, nested);
+  if (!pta.solve() || !pta.isUnknown(loaded))
+    return 1; // A subobject created after havoc inherits its effects.
+  return 0;
+}
+
+static bool boundedProjection() {
+  Andersen pta;
+  const auto object = pta.addNode(), field = pta.addNode();
+  auto pointer = pta.addNode();
+  pta.address(pointer, object);
+  for (unsigned depth = 0; depth < 12; ++depth)
+    pointer = pta.project(pointer, field);
+  return pta.solve() && pta.isUnknown(pointer);
+}
+
 int main() {
+  if (!boundedProjection())
+    return 1;
+  if (fieldTests()) {
+    std::cerr << "FAIL: field/object separation, aliases, capture or havoc\n";
+    return 1;
+  }
   if (basicTests())
     return 1;
 

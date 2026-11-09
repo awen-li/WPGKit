@@ -70,6 +70,53 @@ void Andersen::store(Node pointer, Node source) {
   addConstraint(Kind::Store, pointer, source);
 }
 
+Andersen::Node Andersen::project(Node basePointer, Node field) {
+  const auto destination = addNode();
+  projectionFields_.emplace(destination, field);
+  if (capturing_)
+    captured_.push_back({FactKind::Project, destination, basePointer});
+  else
+    addConstraint(Kind::Project, destination, basePointer);
+  return destination;
+}
+
+std::optional<Andersen::Node> Andersen::subobject(Node base, Node field) {
+  const auto key = std::pair{base, field};
+  if (const auto found = subobjects_.find(key); found != subobjects_.end())
+    return found->second;
+  const auto depth = subobjectDepths_.find(base);
+  // Reinterpreted/cyclic projections must not create an infinite object tree.
+  if (depth != subobjectDepths_.end() && depth->second >= 8)
+    return {};
+  const auto result = addNode();
+  subobjects_.emplace(key, result);
+  subobjectDepths_.emplace(
+      result, depth == subobjectDepths_.end() ? 1 : depth->second + 1);
+  taintUnknown(result, base);
+  taintUnknown(result, field); // Legacy/unbounded field effects remain visible.
+  if (nodes_.at(base).havoc) {
+    markUnknown(result);
+    havoc(result);
+  }
+  return result;
+}
+
+void Andersen::projectTargets(Node destination, Node source) {
+  const auto field = projectionFields_.at(destination);
+  const auto targets = pointsTo(source);
+  const std::vector<Node> bases(targets.begin(), targets.end());
+  // Subobject creation can reallocate node storage; do not retain its
+  // iterators.
+  for (const auto base : bases) {
+    if (const auto object = subobject(base, field))
+      address(destination, *object);
+    else
+      markUnknown(destination);
+  }
+  if (isUnknown(source))
+    markUnknown(destination);
+}
+
 void Andersen::taintUnknown(Node destination, Node source) {
   if (capturing_) {
     captured_.push_back({FactKind::TaintUnknown, destination, source});
@@ -106,6 +153,11 @@ void Andersen::havoc(Node pointer) {
   if (nodes_.at(pointer).havoc)
     return;
   nodes_[pointer].havoc = true;
+  for (auto it = subobjects_.lower_bound({pointer, 0});
+       it != subobjects_.end() && it->first.first == pointer; ++it) {
+    markUnknown(it->second);
+    havoc(it->second);
+  }
   addConstraint(Kind::Havoc, pointer, pointer);
 }
 
@@ -142,6 +194,9 @@ void Andersen::replay(std::span<const Fact> facts) {
       break;
     case FactKind::Havoc:
       havoc(fact.destination);
+      break;
+    case FactKind::Project:
+      addConstraint(Kind::Project, fact.destination, fact.source);
       break;
     }
   }
@@ -230,6 +285,9 @@ void Andersen::process(std::size_t index) {
   ++processedConstraints_;
   const auto constraint = constraints_[index];
   switch (constraint.kind) {
+  case Kind::Project:
+    projectTargets(constraint.destination, constraint.source);
+    break;
   case Kind::Copy:
     include(constraint.destination, constraint.source);
     break;
