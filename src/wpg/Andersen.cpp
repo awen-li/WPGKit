@@ -84,6 +84,11 @@ std::optional<Andersen::Node> Andersen::subobject(Node base, Node field) {
   const auto key = std::pair{base, field};
   if (const auto found = subobjects_.find(key); found != subobjects_.end())
     return found->second;
+  if (!fieldSensitive_) {
+    subobjects_.emplace(key, base);
+    taintUnknown(base, field);
+    return base;
+  }
   const auto depth = subobjectDepths_.find(base);
   // Reinterpreted/cyclic projections must not create an infinite object tree.
   if (depth != subobjectDepths_.end() && depth->second >= 8)

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AnalysisOptions.h"
 #include "CapturedCFG.h"
 #include "FunctionCFG.h"
 #include "GraphIds.h"
@@ -131,9 +132,11 @@ public:
   // Optional profiler is borrowed and must outlive the session. The catalog
   // is copied and fixed before extraction. Empty means conservative fallback
   // for calls without supplied bodies, not absence of their effects.
+  // Analysis options are also copied and fixed for the entire session.
   explicit CallGraphSession(Profiler *profiler = nullptr,
                             FunctionFactObserver observe = {},
-                            ExternalModules models = {});
+                            ExternalModules models = {},
+                            AnalysisOptions options = {});
   ~CallGraphSession();
   CallGraphSession(CallGraphSession &&) noexcept;
   CallGraphSession &operator=(CallGraphSession &&) noexcept;
@@ -176,7 +179,7 @@ public:
   run(const std::vector<clang::ASTContext *> &units,
       const std::vector<std::string> &qualifiedRoots,
       Profiler *profiler = nullptr, FunctionFactObserver observe = {},
-      ExternalModules models = {});
+      ExternalModules models = {}, AnalysisOptions options = {});
 
   // Parse all explicit inputs once with their exact compilation commands,
   // release each AST, then solve over owned facts without reparsing. The
@@ -186,7 +189,7 @@ public:
            const std::string &databaseDirectory,
            const std::vector<std::string> &qualifiedRoots,
            Profiler *profiler = nullptr, FunctionFactObserver observe = {},
-           ExternalModules models = {});
+           ExternalModules models = {}, AnalysisOptions options = {});
 
   // Parse every command selected by the actual GNU linker map once before
   // solving. Missing object mappings and shared libraries remain explicit.
@@ -194,13 +197,13 @@ public:
   runLinkMap(const std::string &mapPath, const std::string &databaseDirectory,
              const std::vector<std::string> &qualifiedRoots,
              Profiler *profiler = nullptr, FunctionFactObserver observe = {},
-             ExternalModules models = {});
+             ExternalModules models = {}, AnalysisOptions options = {});
   static llvm::Expected<CallGraphResult>
   runLinkMaps(const std::vector<std::string> &mapPaths,
               const std::string &databaseDirectory,
               const std::vector<std::string> &qualifiedRoots,
               Profiler *profiler = nullptr, FunctionFactObserver observe = {},
-              ExternalModules models = {});
+              ExternalModules models = {}, AnalysisOptions options = {});
 };
 
 } // namespace wpgkit

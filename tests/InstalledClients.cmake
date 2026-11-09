@@ -22,11 +22,17 @@ run("${CMAKE_COMMAND}" -S "${CLIENT_DIR}" -B "${WORK_DIR}/client-build"
   "-DCMAKE_BUILD_TYPE=${CONFIG}")
 run("${CMAKE_COMMAND}" --build "${WORK_DIR}/client-build" --config "${CONFIG}" -j 2)
 file(WRITE "${WORK_DIR}/fixture.cpp"
-  "void target() {} void relay(void (*f)()) { f(); }\n"
-  "void entry() { relay(target); }\n")
+  "void target() {} void alternate() {} void relay(void (*f)()) { f(); }\n"
+  "struct Callbacks { void (*left)(); void (*right)(); };\n"
+  "void entry() { Callbacks callbacks{target, alternate}; relay(callbacks.left); }\n")
 file(WRITE "${WORK_DIR}/compile_commands.json"
   "[{\"directory\":\"${WORK_DIR}\",\"file\":\"${WORK_DIR}/fixture.cpp\","
-  "\"arguments\":[\"${CLANG}\",\"-std=c++20\",\"-c\",\"${WORK_DIR}/fixture.cpp\"]}]")
+  "\"arguments\":[\"${CLANG}\",\"-std=c++20\",\"-fPIC\",\"-c\",\"${WORK_DIR}/fixture.cpp\","
+  "\"-o\",\"${WORK_DIR}/fixture.o\"]}]")
+run("${CLANG}" -std=c++20 -fPIC -c "${WORK_DIR}/fixture.cpp"
+  -o "${WORK_DIR}/fixture.o")
+run("${CLANG}" -shared "${WORK_DIR}/fixture.o"
+  "-Wl,-Map=${WORK_DIR}/linked.map" -o "${WORK_DIR}/libfixture.so")
 foreach(kind static shared analysis)
   run("${WORK_DIR}/client-build/client-${kind}" "${WORK_DIR}" "${WORK_DIR}/fixture.cpp")
   if(kind STREQUAL "static")

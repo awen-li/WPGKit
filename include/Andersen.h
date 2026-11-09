@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AnalysisOptions.h"
 #include "llvm/ADT/SparseBitVector.h"
 #include "llvm/ADT/iterator_range.h"
 #include <cstddef>
@@ -78,13 +79,21 @@ private:
   };
 
 public:
+  explicit Andersen(AnalysisOptions options = {})
+      : fieldSensitive_(options.fieldSensitive) {}
+
+  bool fieldSensitive() const noexcept {
+    return fieldSensitive_;
+  }
+
   Node addNode();
   void address(Node destination, Node object); // p = &o
   void copy(Node destination, Node source);    // p = q
   void load(Node destination, Node pointer);   // p = *q
   void store(Node pointer, Node source);       // *p = q
-  // Address of a field relative to each possible base object. The field key
-  // is a stable numeric declaration identity; no AST is retained.
+  // Address of a field relative to each possible base object. With field
+  // sensitivity disabled this aliases the base object. The field key is a
+  // stable numeric declaration identity; no AST is retained.
   Node project(Node basePointer, Node field);
   void taintUnknown(Node destination,
                     Node source); // unknown base may hide a field value
@@ -164,6 +173,7 @@ public:
   }
 
 private:
+  bool fieldSensitive_ = false;
   enum class Kind { Copy, Load, Store, TaintUnknown, Havoc, Project };
 
   struct Constraint {

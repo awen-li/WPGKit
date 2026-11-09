@@ -375,9 +375,9 @@ private:
 class Engine final {
 public:
   explicit Engine(Profiler *profiler, FunctionFactObserver observe,
-                  ExternalModules models)
-      : models_(models), profiler_(profiler), observe_(std::move(observe)),
-        interCFG_(std::make_shared<InterCFG>()) {
+                  ExternalModules models, AnalysisOptions options)
+      : models_(models), pta_(options), profiler_(profiler),
+        observe_(std::move(observe)), interCFG_(std::make_shared<InterCFG>()) {
     if (!models_.isEmpty())
       modelEffects_.emplace(pta_);
   }
@@ -2687,8 +2687,9 @@ Engine::run(const std::vector<std::string> &roots, bool finalize,
 
 struct CallGraphSession::Impl final {
   explicit Impl(Profiler *profiler, FunctionFactObserver observe,
-                ExternalModules models)
-      : engine(profiler, std::move(observe), models), profiler(profiler) {}
+                ExternalModules models, AnalysisOptions options)
+      : engine(profiler, std::move(observe), models, options),
+        profiler(profiler) {}
 
   Engine engine;
   Profiler *profiler = nullptr;
@@ -2696,8 +2697,10 @@ struct CallGraphSession::Impl final {
 
 CallGraphSession::CallGraphSession(Profiler *profiler,
                                    FunctionFactObserver observe,
-                                   ExternalModules models)
-    : impl_(std::make_unique<Impl>(profiler, std::move(observe), models)) {}
+                                   ExternalModules models,
+                                   AnalysisOptions options)
+    : impl_(std::make_unique<Impl>(profiler, std::move(observe), models,
+                                   options)) {}
 
 CallGraphSession::~CallGraphSession() = default;
 CallGraphSession::CallGraphSession(CallGraphSession &&) noexcept = default;
@@ -2737,12 +2740,12 @@ llvm::Expected<CallGraphResult>
 CallGraphPTA::run(const std::vector<clang::ASTContext *> &units,
                   const std::vector<std::string> &qualifiedRoots,
                   Profiler *profiler, FunctionFactObserver observe,
-                  ExternalModules models) {
+                  ExternalModules models, AnalysisOptions options) {
   Profiler::Scope phase(profiler, "analysis");
   if (units.empty())
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "at least one unit is required");
-  CallGraphSession session(profiler, std::move(observe), models);
+  CallGraphSession session(profiler, std::move(observe), models, options);
   for (auto *unit : units) {
     if (!unit)
       return llvm::createStringError(llvm::inconvertibleErrorCode(),

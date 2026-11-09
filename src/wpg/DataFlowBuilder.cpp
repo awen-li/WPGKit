@@ -234,13 +234,15 @@ private:
             partition.parents[partition.root(object)] =
                 partition.root(representative);
         }
-      if (count == 1)
+      if (pta.fieldSensitive() && count == 1)
         partition.singletonPointers.insert(access.pointer);
       partition.pointees.emplace(access.pointer, representative);
     }
-    for (std::uint32_t object = 0; object < partition.parents.size(); ++object)
-      if (partition.parents[object] != object)
-        partition.summaries.insert(partition.root(object));
+    if (pta.fieldSensitive())
+      for (std::uint32_t object = 0; object < partition.parents.size();
+           ++object)
+        if (partition.parents[object] != object)
+          partition.summaries.insert(partition.root(object));
     return partition;
   }
 
@@ -270,8 +272,9 @@ private:
           found->second = graph->addNode(
               {{}, DataNodeKind::Memory, partition.root(object)});
         region = found->second;
-        if (!access.indirect ||
-            partition.singletonPointers.contains(access.pointer)) {
+        if (pta.fieldSensitive() &&
+            (!access.indirect ||
+             partition.singletonPointers.contains(access.pointer))) {
           auto [cell, added] = exact.try_emplace(object);
           if (added) {
             cell->second =

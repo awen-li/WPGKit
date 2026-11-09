@@ -25,8 +25,8 @@ void add(CallGraphSession &session, const char *code) {
   session.addUnit(ast->getASTContext());
 }
 
-CallGraphResult fixture(const char *code) {
-  CallGraphSession session;
+CallGraphResult fixture(const char *code, AnalysisOptions options = {}) {
+  CallGraphSession session(nullptr, {}, {}, options);
   add(session,
       code); // AST destroyed before either fixed point or DFG construction.
   auto result = session.finalize({"entry"});
@@ -183,15 +183,24 @@ void fieldIdentity() {
       path(*program.dataFlow, inputs.at(0), output) &&
           !path(*program.dataFlow, inputs.at(1), output),
       "field dependencies retain base object identity through pointer aliases");
-  const auto fields = fixture(R"cpp(
+  const auto code = R"cpp(
     struct Pair { int first, second; };
     int entry(int a, int b) { Pair pair{a, b}; return pair.first; }
-  )cpp");
-  const auto parameters = nodes(fields, DataNodeKind::Parameter);
-  const auto returned = nodes(fields, DataNodeKind::Return).at(0);
-  check(path(*fields.dataFlow, parameters.at(0), returned) &&
-            !path(*fields.dataFlow, parameters.at(1), returned),
-        "different fields of the same object remain distinct");
+  )cpp";
+  for (const bool sensitive : {false, true}) {
+    const auto fields = fixture(code, {.fieldSensitive = sensitive});
+    const auto parameters = nodes(fields, DataNodeKind::Parameter);
+    const auto returned = nodes(fields, DataNodeKind::Return).at(0);
+    check(path(*fields.dataFlow, parameters.at(0), returned) &&
+              path(*fields.dataFlow, parameters.at(1), returned) != sensitive,
+          "field mode controls cross-field dependencies");
+    check(std::any_of(fields.dataFlow->edges().begin(),
+                      fields.dataFlow->edges().end(),
+                      [](const auto &edge) {
+                        return edge.kind == DataEdgeKind::Location;
+                      }) == sensitive,
+          "collapsed fields do not advertise distinct update locations");
+  }
 }
 
 void calls() {

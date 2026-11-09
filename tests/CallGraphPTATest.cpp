@@ -1042,7 +1042,53 @@ int instantiatedOverrides() {
 
 } // namespace
 
+bool fieldSensitivityOptions() {
+  auto ast = clang::tooling::buildASTFromCodeWithArgs(R"cpp(
+    void first() {} void second() {} void unrelated() {}
+    struct Callbacks { void (*left)(); void (*right)(); };
+    void entry() {
+      Callbacks selected{first, second}, other{unrelated, unrelated};
+      selected.left();
+    }
+  )cpp",
+                                                      {"-std=c++20"},
+                                                      "field_options.cpp");
+  if (!ast || ast->getDiagnostics().hasErrorOccurred())
+    return false;
+  auto defaults = CallGraphPTA::run({&ast->getASTContext()}, {"entry"});
+  if (!defaults) {
+    std::cerr << llvm::toString(defaults.takeError()) << '\n';
+    return false;
+  }
+  if (!check(edge(*defaults, "entry", "first") &&
+                 edge(*defaults, "entry", "second") &&
+                 !edge(*defaults, "entry", "unrelated"),
+             "default run merges fields but separates objects"))
+    return false;
+  wpgkit::AnalysisOptions options{.fieldSensitive = true};
+  CallGraphSession session(nullptr, {}, {}, options);
+  options.fieldSensitive = false;
+  session.addUnit(ast->getASTContext());
+  auto run = CallGraphPTA::run({&ast->getASTContext()}, {"entry"}, nullptr, {},
+                               {}, {.fieldSensitive = true});
+  ast.reset();
+  auto precise = session.finalize({"entry"});
+  for (auto *result : {&run, &precise}) {
+    if (!*result) {
+      std::cerr << llvm::toString(result->takeError()) << '\n';
+      return false;
+    }
+    if (!check(edge(**result, "entry", "first") &&
+                   !edge(**result, "entry", "second"),
+               "explicit field mode is copied and survives AST release"))
+      return false;
+  }
+  return true;
+}
+
 int main() {
+  if (!fieldSensitivityOptions())
+    return 1;
   for (const auto test : {parameterAndReferenceStorage,
                           crossUnitCalls,
                           ownedCFGLifetime,

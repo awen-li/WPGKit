@@ -16,8 +16,8 @@ void ExternalEffects::unknownMemory() {
 }
 
 void ExternalEffects::clobberFields() {
-  // Byte ranges cannot be mapped to field nodes yet. Fields are merged across
-  // instances, so conservatively retain unknown contents for every field.
+  // Byte ranges cannot be mapped to subobjects yet. Mark declaration-level
+  // field keys; projections propagate this effect in either sensitivity mode.
   // Runtime memory models run after imports end; no new fields can arrive.
   if (fieldsClobbered_)
     return;

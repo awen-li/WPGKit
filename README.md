@@ -116,6 +116,21 @@ imports. The lower-level `Andersen` component also exposes points-to queries;
 the high-level result currently exposes graphs and PTA statistics, rather than
 a complete variable-to-points-to query interface.
 
+`AnalysisOptions::fieldSensitive` is **false by default**. In that mode,
+fields, nested fields and array elements share their base object's abstract
+storage; different base objects remain distinct. Enable it before extraction
+when a client needs separate field and constant-index identities:
+
+```cpp
+wpgkit::AnalysisOptions options{.fieldSensitive = true};
+wpgkit::CallGraphSession session(nullptr, {}, {}, options);
+// Or pass options as the last argument of run/runFiles/runLinkMap/runLinkMaps.
+```
+
+The options are copied at session creation and cannot change an active analysis.
+Both modes use the same incremental solver. The standalone CLI uses the default.
+The low-level `Andersen` constructor accepts the same options.
+
 A read-only extraction observer lets a downstream analysis collect its own
 owned facts at existing CFG/DFG identities during the same parse. Consumers
 must not retain native AST references. The [public session API](include/CallGraphPTA.h)
@@ -197,12 +212,15 @@ entry is a single measurement, not an average over repeated trials.
 - CFG-derived local pointer definitions distinguish supported nonescaping
   locals. Aliasable memory and DFG memory partitions retain conservative,
   flow-insensitive merging; calling contexts are merged by the solver.
-- Supported field projections use numeric base-object and field identities.
+- With field sensitivity enabled, supported projections use numeric base-object
+  and field identities.
   Constant indices of direct arrays have separate subobjects. Unknown indices,
   unsupported address expressions, and projections deeper than eight levels
   remain conservative. These bounds do not imply complete C++ alias modeling.
-- DFG `Location` edges preserve singleton storage identities alongside coarse
-  dependency partitions. A singleton abstract location alone does not justify
+- In that mode DFG `Location` edges preserve singleton storage identities
+  alongside coarse dependency partitions. Field-insensitive graphs retain
+  `Memory` dependencies but omit `Location` edges, so collapsed fields cannot
+  be mistaken for distinct update locations. A singleton abstract location alone does not justify
   a strong update: clients must also establish concrete-object uniqueness.
   Trivial record copies and named lambda captures reuse these shared facts.
 - Inter-CFG return connections carry matching IDs. A consumer that needs

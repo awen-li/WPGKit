@@ -27,8 +27,9 @@ enum class DataEdgeKind : std::uint8_t {
   Return,
   Memory,
   Summary,
-  // A precise singleton storage access, or a partition-to-subobject relation.
-  // Dependency edges still use Memory; clients doing updates inspect Location.
+  // A singleton storage access, or a partition-to-subobject relation, emitted
+  // when field sensitivity is enabled. Dependency edges still use Memory.
+  // Collapsed fields must not be mistaken for distinct update locations.
   Location
 };
 enum class DataGapKind : std::uint8_t {

@@ -139,7 +139,8 @@ parseUnit(const CompileCommand &command, Profiler *profiler) {
 llvm::Expected<CallGraphResult>
 analyze(const std::vector<CompileCommand> &commands,
         const std::vector<std::string> &qualifiedRoots, Profiler *profiler,
-        FunctionFactObserver observe, ExternalModules models) {
+        FunctionFactObserver observe, ExternalModules models,
+        AnalysisOptions options) {
   if (commands.empty())
     return llvm::createStringError(
         llvm::inconvertibleErrorCode(),
@@ -152,7 +153,7 @@ analyze(const std::vector<CompileCommand> &commands,
   // The owned result survives its session. Destroy solver/extraction storage
   // before trimming the allocator and handing the graph to later stages.
   auto result = [&]() -> llvm::Expected<CallGraphResult> {
-    CallGraphSession session(profiler, std::move(observe), models);
+    CallGraphSession session(profiler, std::move(observe), models, options);
     for (std::size_t index = 0; index < commands.size(); ++index) {
       auto unit = parseUnit(commands[index], profiler);
       if (!unit)
@@ -220,7 +221,7 @@ CallGraphPTA::runFiles(const std::vector<std::string> &sources,
                        const std::string &databaseDirectory,
                        const std::vector<std::string> &qualifiedRoots,
                        Profiler *profiler, FunctionFactObserver observe,
-                       ExternalModules models) {
+                       ExternalModules models, AnalysisOptions options) {
   Profiler::Scope phase(profiler, "analysis");
   if (sources.empty())
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
@@ -253,16 +254,18 @@ CallGraphPTA::runFiles(const std::vector<std::string> &sources,
       commands.push_back(std::move(choices.front()));
     }
   }
-  return analyze(commands, qualifiedRoots, profiler, std::move(observe),
-                 models);
+  return analyze(commands, qualifiedRoots, profiler, std::move(observe), models,
+                 options);
 }
 
-llvm::Expected<CallGraphResult> CallGraphPTA::runLinkMap(
-    const std::string &mapPath, const std::string &databaseDirectory,
-    const std::vector<std::string> &qualifiedRoots, Profiler *profiler,
-    FunctionFactObserver observe, ExternalModules models) {
+llvm::Expected<CallGraphResult>
+CallGraphPTA::runLinkMap(const std::string &mapPath,
+                         const std::string &databaseDirectory,
+                         const std::vector<std::string> &qualifiedRoots,
+                         Profiler *profiler, FunctionFactObserver observe,
+                         ExternalModules models, AnalysisOptions options) {
   return runLinkMaps({mapPath}, databaseDirectory, qualifiedRoots, profiler,
-                     std::move(observe), models);
+                     std::move(observe), models, options);
 }
 
 llvm::Expected<CallGraphResult>
@@ -270,7 +273,7 @@ CallGraphPTA::runLinkMaps(const std::vector<std::string> &mapPaths,
                           const std::string &databaseDirectory,
                           const std::vector<std::string> &qualifiedRoots,
                           Profiler *profiler, FunctionFactObserver observe,
-                          ExternalModules models) {
+                          ExternalModules models, AnalysisOptions options) {
   Profiler::Scope phase(profiler, "analysis");
   auto inventory = [&] {
     Profiler::Scope inputPhase(profiler, "input_discovery");
@@ -310,8 +313,8 @@ CallGraphPTA::runLinkMaps(const std::vector<std::string> &mapPaths,
       selected.push_back(std::move(found->second.front()));
     }
   }
-  auto result =
-      analyze(selected, qualifiedRoots, profiler, std::move(observe), models);
+  auto result = analyze(selected, qualifiedRoots, profiler, std::move(observe),
+                        models, options);
   if (!result)
     return result.takeError();
   for (const auto &path : mapPaths)

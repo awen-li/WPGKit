@@ -351,7 +351,7 @@ private:
 };
 
 static int fieldTests() {
-  Andersen pta;
+  Andersen pta({.fieldSensitive = true});
   const auto a = pta.addNode(), b = pta.addNode(), field = pta.addNode();
   const auto pa = pta.addNode(), pb = pta.addNode(), alias = pta.addNode();
   const auto f = pta.addNode(), g = pta.addNode(), value = pta.addNode();
@@ -388,7 +388,7 @@ static int fieldTests() {
 }
 
 static bool boundedProjection() {
-  Andersen pta;
+  Andersen pta({.fieldSensitive = true});
   const auto object = pta.addNode(), field = pta.addNode();
   auto pointer = pta.addNode();
   pta.address(pointer, object);
@@ -397,7 +397,39 @@ static bool boundedProjection() {
   return pta.solve() && pta.isUnknown(pointer);
 }
 
+static bool collapsedFields() {
+  Andersen pta;
+  const auto object = pta.addNode(), other = pta.addNode();
+  const auto base = pta.addNode(), otherBase = pta.addNode();
+  const auto field = pta.addNode(), secondField = pta.addNode();
+  const auto function = pta.addNode(), input = pta.addNode();
+  pta.beginCapture();
+  pta.address(base, object);
+  pta.address(otherBase, other);
+  const auto first = pta.project(base, field);
+  const auto second = pta.project(base, secondField);
+  const auto nested = pta.project(second, field);
+  const auto separate = pta.project(otherBase, field);
+  const auto read = pta.addNode(), otherRead = pta.addNode();
+  pta.address(input, function);
+  pta.store(first, input);
+  pta.load(read, nested);
+  pta.load(otherRead, separate);
+  pta.replay(pta.endCapture());
+  if (pta.fieldSensitive() || !pta.solve() || pta.objectCount() != 3 ||
+      !pta.mayPointTo(read, function) || pta.mayPointTo(otherRead, function) ||
+      !pta.mayPointTo(second, object))
+    return false;
+  // Unbounded external field writes still affect collapsed object contents.
+  pta.markUnknown(secondField);
+  return pta.solve() && pta.isUnknown(read) && !pta.isUnknown(otherRead);
+}
+
 int main() {
+  if (!collapsedFields()) {
+    std::cerr << "FAIL: default field collapse, object separation or effects\n";
+    return 1;
+  }
   if (!boundedProjection())
     return 1;
   if (fieldTests()) {
