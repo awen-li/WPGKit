@@ -441,6 +441,40 @@ void snapshots() {
                nodes(*after, DataNodeKind::Return).at(0)),
       "cross-unit dependencies survive consuming the session and releasing extraction buffers");
 }
+
+void methodReceivers() {
+  const auto program = fixture(
+      "struct Box { int value; int get(int x) const { return value + x; }"
+      "int operator()(int x) const { return get(x); } };"
+      "int entry(Box *box, int x) { return (*box)(x); }");
+  for (const char *name : {"Box::get", "Box::operator()"}) {
+    const auto parameters = nodes(program, DataNodeKind::Parameter, name);
+    check(parameters.size() == 1,
+          "receiver is separate from the single explicit method parameter");
+    const auto receivers = nodes(program, DataNodeKind::Receiver, name);
+    check(!receivers.empty(), "ordinary methods own receiver nodes");
+    const auto formal =
+        std::find_if(receivers.begin(), receivers.end(), [&](auto id) {
+          const auto *node = program.dataFlow->node(id);
+          return node->position ==
+                 *program.interCFG->entry(node->position.body);
+        });
+    check(formal != receivers.end(), "method has an entry receiver");
+    check(std::any_of(program.dataFlow->edges().begin(),
+                      program.dataFlow->edges().end(),
+                      [&](const auto &edge) {
+                        return edge.kind == DataEdgeKind::ActualFormal &&
+                               edge.target == *formal &&
+                               edge.connection.isValid() &&
+                               program.dataFlow->node(edge.source)->kind ==
+                                   DataNodeKind::Receiver;
+                      }),
+          "member and operator calls bind actual/formal receivers");
+    const auto returned = nodes(program, DataNodeKind::Return, name);
+    check(!returned.empty() && path(*program.dataFlow, *formal, returned[0]),
+          "receiver reaches this-use and method result after AST release");
+  }
+}
 } // namespace
 
 int main() {
@@ -454,4 +488,5 @@ int main() {
   destructorExpressions();
   unavailableDestructor();
   snapshots();
+  methodReceivers();
 }

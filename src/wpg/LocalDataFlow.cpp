@@ -81,6 +81,27 @@ public:
     return true;
   }
 
+  bool TraverseCXXForRangeStmt(clang::CXXForRangeStmt *loop) {
+    if (!WalkUpFromCXXForRangeStmt(loop))
+      return false;
+    for (auto *child : loop->children()) {
+      if (auto *decls = llvm::dyn_cast_or_null<clang::DeclStmt>(child)) {
+        for (auto *decl : decls->decls()) {
+          if (auto *variable = llvm::dyn_cast<clang::VarDecl>(decl)) {
+            if (!TraverseVarDecl(variable))
+              return false;
+            if (variable->isCXXForRangeDecl() &&
+                !TraverseStmt(variable->getInit()))
+              return false;
+          } else if (!TraverseDecl(decl))
+            return false;
+        }
+      } else if (!TraverseStmt(child))
+        return false;
+    }
+    return true;
+  }
+
   bool VisitDeclRefExpr(clang::DeclRefExpr *expr) {
     const auto *decl = llvm::dyn_cast<clang::VarDecl>(expr->getDecl());
     if (!decl || !eligible(decl))
@@ -231,7 +252,11 @@ private:
   }
 
   void inventory() {
-    if (data_ && llvm::isa<clang::CXXDestructorDecl>(function_))
+    // Constructor object storage is not a value argument yet. Keep that
+    // binding unsupported instead of conflating it with the call result.
+    const auto *method = llvm::dyn_cast<clang::CXXMethodDecl>(&function_);
+    if (data_ && method && !method->isStatic() &&
+        !llvm::isa<clang::CXXConstructorDecl>(method))
       data_->receiver =
           *addData(entryPosition(), DataNodeKind::Receiver, NoDataIndex);
     for (auto *param : function_.parameters()) {

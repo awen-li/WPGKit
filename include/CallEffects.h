@@ -5,10 +5,11 @@
 
 namespace wpgkit {
 
-enum class ParamKind { Other, Pointer, ReferenceToPointer, Reference };
+enum class ParamKind { Other, Pointer, ReferenceToPointer, Reference, Record };
 
 // Numeric pointer-value ID; Other has no pointer node. Shared by actual/formal
 // binding and runtime effects, without exposing a solver or compiler type.
+// Record points to the independent object passed by value.
 struct CallArgument final {
   std::uint32_t node;
   ParamKind kind;

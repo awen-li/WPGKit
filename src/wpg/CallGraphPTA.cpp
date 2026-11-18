@@ -186,6 +186,8 @@ ParamKind paramKind(clang::QualType type) {
     return ParamKind::ReferenceToPointer;
   if (type->isReferenceType())
     return ParamKind::Reference;
+  if (type->isRecordType())
+    return ParamKind::Record;
   return ParamKind::Other;
 }
 
@@ -426,6 +428,32 @@ private:
       return true;
     }
 
+    bool TraverseCXXForRangeStmt(clang::CXXForRangeStmt *loop) {
+      // RecursiveASTVisitor normally omits the compiler-generated iterator
+      // setup, condition and increment. They execute and appear in the CFG;
+      // retain their calls and value identities just like explicit loops.
+      if (!WalkUpFromCXXForRangeStmt(loop))
+        return false;
+      for (auto *child : loop->children()) {
+        if (auto *decls = llvm::dyn_cast_or_null<clang::DeclStmt>(child)) {
+          for (auto *decl : decls->decls()) {
+            // TraverseDecl skips implicit __begin/__end variables, including
+            // their executed initializers. Visit these declarations directly.
+            if (auto *variable = llvm::dyn_cast<clang::VarDecl>(decl)) {
+              if (!TraverseVarDecl(variable))
+                return false;
+              if (variable->isCXXForRangeDecl() &&
+                  !TraverseStmt(variable->getInit()))
+                return false;
+            } else if (!TraverseDecl(decl))
+              return false;
+          }
+        } else if (!TraverseStmt(child))
+          return false;
+      }
+      return true;
+    }
+
     bool VisitVarDecl(clang::VarDecl *decl);
     bool VisitBinaryOperator(clang::BinaryOperator *expr);
     bool VisitUnaryOperator(clang::UnaryOperator *expr);
@@ -531,6 +559,9 @@ private:
   void initializeLambda(const clang::VarDecl &, const clang::LambdaExpr &,
                         FunctionId);
   Andersen::Node addressOf(const clang::Expr *expr, FunctionId caller);
+  Andersen::Node recordArgument(const clang::Expr *expr, FunctionId caller);
+  Andersen::Node temporaryRecord(const clang::Expr *expr, FunctionId caller);
+  void constructionReceiver(std::size_t site, Andersen::Node address);
   Andersen::Node value(const clang::Expr *expr, FunctionId caller);
   Andersen::Node extractValue(const clang::Expr *expr, FunctionId caller);
   Andersen::Node expressionValue(const clang::Expr *expr, FunctionId caller);
@@ -611,6 +642,7 @@ private:
   CFGFactObserver captureFacts_; // Borrowed native storage; current body only.
   std::shared_ptr<const DataFlowGraph> dataFlow_;
   std::map<const clang::Expr *, Andersen::Node> pointerValues_;
+  std::map<const clang::Expr *, Andersen::Node> temporaryRecords_;
   std::map<std::uint64_t, Andersen::Node> arrayIndices_;
   std::set<const clang::LambdaExpr *> initializedLambdas_;
   std::size_t cfgLocalVariables_ = 0, cfgLocalFallbacks_ = 0;
@@ -888,8 +920,24 @@ Andersen::Node Engine::fieldNode(const clang::MemberExpr *member,
 
 Andersen::Node Engine::addressOf(const clang::Expr *expr, FunctionId caller) {
   expr = expr->IgnoreParenImpCasts();
+  if (const auto *cleanup = llvm::dyn_cast<clang::ExprWithCleanups>(expr))
+    return addressOf(cleanup->getSubExpr(), caller);
+  if (const auto *materialized =
+          llvm::dyn_cast<clang::MaterializeTemporaryExpr>(expr))
+    return addressOf(materialized->getSubExpr(), caller);
+  if (const auto *bound = llvm::dyn_cast<clang::CXXBindTemporaryExpr>(expr))
+    return addressOf(bound->getSubExpr(), caller);
+  if (const auto *cast = llvm::dyn_cast<clang::ExplicitCastExpr>(expr);
+      cast && (cast->getCastKind() == clang::CK_ConstructorConversion ||
+               cast->getCastKind() == clang::CK_NoOp))
+    return addressOf(cast->getSubExpr(), caller);
+  if (expr->getType()->isRecordType() &&
+      llvm::isa<clang::CXXConstructExpr, clang::InitListExpr>(expr))
+    return temporaryRecord(expr, caller);
   if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(expr)) {
-    if (ref->getDecl()->getType()->isReferenceType())
+    if (ref->getDecl()->getType()->isReferenceType() ||
+        (llvm::isa<clang::ParmVarDecl>(ref->getDecl()) &&
+         ref->getDecl()->getType()->isRecordType()))
       return nodeFor(ref->getDecl());
     const auto result = pta_.addNode();
     if (const auto *function =
@@ -929,6 +977,58 @@ Andersen::Node Engine::addressOf(const clang::Expr *expr, FunctionId caller) {
         callee && callee->getReturnType()->isReferenceType())
       return sites_.at(site(call, caller)).result;
   return unknownValue("unsupported pointer reference binding");
+}
+
+Andersen::Node Engine::temporaryRecord(const clang::Expr *expr,
+                                       FunctionId caller) {
+  if (const auto found = temporaryRecords_.find(expr);
+      found != temporaryRecords_.end())
+    return found->second;
+  const auto address = pta_.addNode();
+  pta_.address(address, pta_.addNode());
+  temporaryRecords_.emplace(expr, address);
+  const auto *record = expr->getType()->getAsCXXRecordDecl();
+  if (const auto *constructed = llvm::dyn_cast<clang::CXXConstructExpr>(expr)) {
+    std::vector<const clang::Expr *> args(constructed->arg_begin(),
+                                          constructed->arg_end());
+    const auto index =
+        site(expr, constructed->getConstructor(), std::move(args), caller);
+    constructionReceiver(index, address);
+    if (constructed->getConstructor()->isTrivial() &&
+        constructed->getConstructor()->isCopyOrMoveConstructor() &&
+        constructed->getNumArgs() == 1)
+      copyAggregate(address, addressOf(constructed->getArg(0), caller), *record,
+                    expr);
+  } else if (const auto *list = llvm::dyn_cast<clang::InitListExpr>(expr);
+             list && record) {
+    initializeFields(address, *record, *list, caller);
+  } else {
+    pta_.havoc(address);
+    limitations_.insert(metadata_.intern("unsupported temporary record"));
+  }
+  return address;
+}
+
+Andersen::Node Engine::recordArgument(const clang::Expr *expr,
+                                      FunctionId caller) {
+  // C++ constructs a separate argument object, including implicit copies.
+  // Its address can bind directly to the formal without aliasing the original.
+  if (!expr->isGLValue())
+    return addressOf(expr, caller);
+  const auto address = pta_.addNode();
+  pta_.address(address, pta_.addNode());
+  if (const auto *record = expr->getType()->getAsCXXRecordDecl())
+    copyAggregate(address, addressOf(expr, caller), *record, expr);
+  else
+    pta_.havoc(address);
+  return address;
+}
+
+void Engine::constructionReceiver(std::size_t site, Andersen::Node address) {
+  sites_[site].receiver = address;
+  sites_[site].localConstruction = true;
+  if (dataCapture_)
+    dataCapture_->constructionReceiver(CallSiteId{site + 1}, address);
 }
 
 Andersen::Node Engine::value(const clang::Expr *expr, FunctionId caller) {
@@ -1308,6 +1408,8 @@ void Engine::captureArguments(std::size_t index, const clang::Expr *expr,
     Andersen::Node node = 0;
     if (args[i] && kind == ParamKind::Pointer)
       node = value(args[i], caller);
+    else if (args[i] && kind == ParamKind::Record)
+      node = recordArgument(args[i], caller);
     else if (args[i] && (kind == ParamKind::ReferenceToPointer ||
                          kind == ParamKind::Reference))
       node = addressOf(args[i], caller);
@@ -1909,8 +2011,7 @@ bool Engine::Body::VisitVarDecl(clang::VarDecl *decl) {
     const auto site = constructionSite(construct);
     const auto address = engine_.pta_.addNode();
     engine_.pta_.address(address, engine_.nodeFor(decl));
-    engine_.sites_[site].receiver = address;
-    engine_.sites_[site].localConstruction = true;
+    engine_.constructionReceiver(site, address);
   }
   if (engine_.dataCapture_)
     engine_.dataCapture_->variable(decl);
@@ -2308,6 +2409,7 @@ void Engine::finishCFGCapture(llvm::Expected<FunctionCFG> graph,
   siteByExpr_.clear();
   siteByDecl_.clear();
   pointerValues_.clear();
+  temporaryRecords_.clear();
   initializedLambdas_.clear();
   unevaluated_.clear();
   if (graph) {
@@ -2358,6 +2460,7 @@ void Engine::extract(clang::ASTContext &unit) {
       initializeAggregate(global, FunctionId{});
   }
   pointerValues_.clear();
+  temporaryRecords_.clear();
   initializedLambdas_.clear();
   auto globalBatch = pta_.endCapture();
   globalFacts_.insert(globalFacts_.end(), globalBatch.begin(),
@@ -2415,6 +2518,7 @@ void Engine::extract(clang::ASTContext &unit) {
   siteByExpr_.clear();
   siteByDecl_.clear();
   pointerValues_.clear();
+  temporaryRecords_.clear();
   initializedLambdas_.clear();
   activeUnitId_ = {};
 }

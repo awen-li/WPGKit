@@ -35,6 +35,7 @@ public:
             std::span<const clang::Expr *const> arguments,
             std::vector<std::uint32_t> pointers, std::uint32_t receiver,
             const clang::FunctionDecl *callee);
+  void constructionReceiver(CallSiteId site, std::uint32_t receiver);
   void destructor(CallSiteId site, CFGPosition position,
                   const clang::VarDecl *object = nullptr);
   void unknown();
@@ -46,6 +47,10 @@ public:
   [[nodiscard]] const DataCall *callFacts(CallSiteId site) const;
   [[nodiscard]] std::uint32_t
   variableNode(const clang::VarDecl *variable) const;
+
+  [[nodiscard]] std::uint32_t receiverNode() const {
+    return facts_.receiver;
+  }
   [[nodiscard]] std::uint32_t fieldNode(const clang::Expr *initializer) const;
 
 private:
@@ -53,7 +58,7 @@ private:
   void memory(const clang::Expr *expression, std::uint32_t event, bool write);
   void read(const clang::DeclRefExpr *expression, std::uint32_t event);
   void valueEdge(const clang::Stmt *source, std::uint32_t target);
-  void destructorReceiver(const clang::Expr *expression, DataCall &call);
+  void callReceiver(const clang::Expr *expression, DataCall &call);
   FunctionDataFlow &facts_;
   const LocalDataFlow &locals_;
   const clang::FunctionDecl *function_ =

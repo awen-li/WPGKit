@@ -74,7 +74,7 @@ void ClangDataFlow::parameters(const clang::FunctionDecl &function) {
     if (!locals_.refines(param))
       facts_.memory.push_back(
           {facts_.parameters.at(param->getFunctionScopeIndex()),
-           storage_(param), false, true});
+           storage_(param), param->getType()->isRecordType(), true});
 }
 
 std::uint32_t ClangDataFlow::node(const clang::Stmt *statement) {
@@ -115,7 +115,9 @@ void ClangDataFlow::memory(const clang::Expr *expression, std::uint32_t event,
   bool indirect = true;
   if (const auto *ref = llvm::dyn_cast<clang::DeclRefExpr>(expression)) {
     pointer = storage_(ref->getDecl());
-    indirect = ref->getDecl()->getType()->isReferenceType();
+    indirect = ref->getDecl()->getType()->isReferenceType() ||
+               (llvm::isa<clang::ParmVarDecl>(ref->getDecl()) &&
+                ref->getDecl()->getType()->isRecordType());
   } else if (const auto *member =
                  llvm::dyn_cast<clang::MemberExpr>(expression)) {
     if (llvm::isa<clang::FieldDecl>(member->getMemberDecl())) {
@@ -291,16 +293,26 @@ void ClangDataFlow::call(const clang::Expr *expression, CallSiteId site,
     valueEdge(arg, argument);
     call.arguments.push_back(argument);
   }
-  if (isDestructor)
-    destructorReceiver(expression, call);
+  if (const auto *method = llvm::dyn_cast_or_null<clang::CXXMethodDecl>(callee);
+      method && !method->isStatic())
+    callReceiver(expression, call);
   facts_.calls.push_back(std::move(call));
 }
 
-void ClangDataFlow::destructorReceiver(const clang::Expr *expression,
-                                       DataCall &call) {
+void ClangDataFlow::constructionReceiver(CallSiteId site,
+                                         std::uint32_t receiver) {
+  facts_.calls.at(calls_.at(site)).receiver = receiver;
+}
+
+void ClangDataFlow::callReceiver(const clang::Expr *expression,
+                                 DataCall &call) {
   const clang::Expr *object = nullptr;
   if (const auto *member = llvm::dyn_cast<clang::CXXMemberCallExpr>(expression))
     object = member->getImplicitObjectArgument();
+  else if (const auto *op =
+               llvm::dyn_cast<clang::CXXOperatorCallExpr>(expression);
+           op && op->getNumArgs())
+    object = op->getArg(0);
   else if (const auto *temporary =
                llvm::dyn_cast<clang::CXXBindTemporaryExpr>(expression))
     object = temporary->getSubExpr();
